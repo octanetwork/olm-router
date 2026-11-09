@@ -1,0 +1,76 @@
+# ========================================================
+# Caddyfile for OLM Router
+# Domains:
+#   - olm.octx.space     (Frontend panel)
+#   - api-olm.octx.space (Primary API router)
+#   - wapi-olm.octx.space(Whitelist / LTE reserve API router)
+# ========================================================
+
+{
+  email admin@octanet.online
+  admin off
+  auto_https off # Or standard auto HTTPS when certs are managed by Caddy
+}
+
+# 1. Main Frontend Web Panel
+http://olm.octx.space, https://olm.octx.space {
+  encode zstd gzip
+
+  # Security headers
+  header {
+    X-Content-Type-Options nosniff
+    X-Frame-Options SAMEORIGIN
+    Referrer-Policy strict-origin-when-cross-origin
+    Strict-Transport-Security "max-age=31536000; includeSubDomains"
+  }
+
+  reverse_proxy 127.0.0.1:8045 {
+    header_up Host {host}
+    header_up X-Real-IP {remote_host}
+    header_up X-Forwarded-For {remote_host}
+    header_up X-Forwarded-Proto {scheme}
+  }
+}
+
+# 2. Primary API Router (Claude Code / LLM / OAuth)
+http://api-olm.octx.space, https://api-olm.octx.space {
+  # Do not buffer SSE streams for Claude streaming
+  @sse {
+    header Accept text/event-stream
+  }
+
+  reverse_proxy 127.0.0.1:8045 {
+    header_up Host {host}
+    header_up X-Real-IP {remote_host}
+    header_up X-Forwarded-For {remote_host}
+    header_up X-Forwarded-Proto {scheme}
+    flush_interval -1
+    transport http {
+      keepalive 60s
+      response_header_timeout 300s
+    }
+  }
+}
+
+# 3. Whitelist / LTE Backup API Router (Optimized for TSPU / mobile restrictions)
+http://wapi-olm.octx.space, https://wapi-olm.octx.space {
+  # Special header identifying wapi route
+  header {
+    X-OLM-Route "wapi-reserve"
+    X-OLM-LTE-Optimized "true"
+  }
+
+  reverse_proxy 127.0.0.1:8045 {
+    header_up Host {host}
+    header_up X-Real-IP {remote_host}
+    header_up X-Forwarded-For {remote_host}
+    header_up X-Forwarded-Proto {scheme}
+    header_up X-OLM-Gateway-Type "wapi"
+    flush_interval -1
+    transport http {
+      keepalive 30s
+      compression off
+      response_header_timeout 180s
+    }
+  }
+}

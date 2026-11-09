@@ -1,0 +1,146 @@
+{
+  "providers": {
+    "antigravity": {
+      "name": "Google Antigravity (Cloud Code PA)",
+      "enabled": true,
+      "authType": "google-oauth",
+      "endpoint": "https://daily-cloudcode-pa.googleapis.com",
+      "defaultProject": "aicode-consumers",
+      "inputBudget": 98000,
+      "models": [
+        {
+          "id": "claude-3-8-flash",
+          "name": "Gemini 3.8 Flash (Antigravity)",
+          "targetModel": "gemini-3.8-flash",
+          "isGemini": true,
+          "isThinking": true,
+          "behavesAs": "claude-sonnet-5",
+          "supportsTools": true,
+          "maxOutputTokens": 64000
+        },
+        {
+          "id": "claude-3-8-flash-lite",
+          "name": "Gemini 3.8 Flash-Lite",
+          "targetModel": "gemini-3.8-flash-lite",
+          "isGemini": true,
+          "isThinking": false,
+          "behavesAs": "claude-haiku-5",
+          "supportsTools": true,
+          "maxOutputTokens": 32000
+        },
+        {
+          "id": "claude-3-5-sonnet",
+          "name": "Claude 3.5 Sonnet (Antigravity Router)",
+          "targetModel": "gemini-3.8-flash",
+          "isGemini": true,
+          "isThinking": true,
+          "behavesAs": "claude-sonnet-5",
+          "supportsTools": true,
+          "maxOutputTokens": 64000
+        },
+        {
+          "id": "claude-3-5-haiku",
+          "name": "Claude 3.5 Haiku",
+          "targetModel": "gemini-3.8-flash-lite",
+          "isGemini": true,
+          "isThinking": false,
+          "behavesAs": "claude-haiku-5",
+          "supportsTools": true,
+          "maxOutputTokens": 16000
+        },
+        {
+          "id": "claude-3-opus",
+          "name": "Claude 3 Opus",
+          "targetModel": "gemini-3.8-flash",
+          "isGemini": true,
+          "isThinking": true,
+          "tier": "max",
+          "behavesAs": "claude-opus-5",
+          "supportsTools": true,
+          "maxOutputTokens": 64000
+        }
+      ]
+    },
+    "qwen": {
+      "name": "Alibaba DashScope (Qwen)",
+      "enabled": true,
+      "authType": "api-key",
+      "endpoint": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+      "configFile": "data/qwen.json",
+      "models": [
+        {
+          "id": "claude-qn-coder",
+          "name": "Qwen 2.5 Coder 32B Instruct",
+          "targetModel": "qwen2.5-coder-32b-instruct",
+          "behavesAs": "claude-sonnet-5"
+        },
+        {
+          "id": "claude-qn-3-max",
+          "name": "Qwen 2.5 Max",
+          "targetModel": "qwen-max-latest",
+          "behavesAs": "claude-sonnet-5"
+        },
+        {
+          "id": "claude-qn-qwq",
+          "name": "QwQ 32B Reasoning",
+          "targetModel": "qwq-32b-preview",
+          "behavesAs": "claude-opus-5",
+          "maxEffort": "max"
+        }
+      ]
+    },
+    "deepseek": {
+      "name": "DeepSeek AI",
+      "enabled": true,
+      "authType": "api-key-or-web",
+      "endpoint": "https://api.deepseek.com/v1",
+      "configFile": "data/deepseek.json",
+      "models": [
+        {
+          "id": "claude-seek-v3",
+          "name": "DeepSeek Chat (V3)",
+          "targetModel": "deepseek-chat",
+          "behavesAs": "claude-sonnet-5"
+        },
+        {
+          "id": "claude-seek-r1",
+          "name": "DeepSeek Reasoner (R1)",
+          "targetModel": "deepseek-reasoner",
+          "behavesAs": "claude-opus-5",
+          "maxEffort": "max"
+        }
+      ]
+    },
+    "cheapvibecode": {
+      "name": "CheapVibeCode Gateway",
+      "enabled": true,
+      "authType": "api-key",
+      "endpoint": "https://ru.cheapvibecode.ru/v1",
+      "configFile": "data/cheapvibecode.json",
+      "models": [
+        {
+          "id": "claude-cvc-sonnet",
+          "name": "CVC Claude Sonnet Proxy",
+          "targetModel": "claude-3-5-sonnet-20241022",
+          "behavesAs": "claude-sonnet-5"
+        }
+      ]
+    },
+    "nvidia": {
+      "name": "Nvidia NIM",
+      "enabled": true,
+      "authType": "api-key",
+      "endpoint": "https://integrate.api.nvidia.com/v1",
+      "configFile": "data/nvidia.json",
+      "inputBudget": 64000,
+      "models": [
+        {
+          "id": "claude-nv-llama-70b",
+          "name": "Llama 3.3 70B Instruct (Nvidia)",
+          "targetModel": "meta/llama-3.3-70b-instruct",
+          "behavesAs": "claude-sonnet-5"
+        }
+      ]
+    }
+  }
+}

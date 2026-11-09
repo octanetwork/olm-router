@@ -1,0 +1,58 @@
+{
+  "security": {
+    "requireAuth": false,
+    "adminToken": "olm-master-change-me-secret-token",
+    "jwtSecret": "olm-jwt-secret-key-32chars-min-change",
+    "rateLimiting": {
+      "enabled": true,
+      "windowMs": 60000,
+      "defaultMax": 120,
+      "burstMax": 30,
+      "banThreshold": 20,
+      "banDurationMs": 300000
+    },
+    "firewall": {
+      "enabled": true,
+      "trustedProxies": ["127.0.0.1", "::1", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"],
+      "blockedIps": [],
+      "blockedUserAgents": [
+        "sqlmap",
+        "nikto",
+        "nmap",
+        "masscan",
+        "python-requests/2.20"
+      ],
+      "maxPayloadBytes": 20971520
+    },
+    "wapiProtection": {
+      "description": "Rules specifically applied to wapi-olm.octx.space (LTE / whitelist IP)",
+      "requireWhitelist": false,
+      "whitelistedIps": ["*"],
+      "allowPrivateRanges": true,
+      "emergencyBypassHeader": "x-olm-lte-bypass",
+      "compressResponses": true,
+      "keepAliveTimeoutMs": 45000
+    },
+    "cors": {
+      "allowedOrigins": [
+        "https://olm.octx.space",
+        "https://api-olm.octx.space",
+        "https://wapi-olm.octx.space",
+        "http://localhost:8045",
+        "http://localhost:3000"
+      ],
+      "allowedMethods": ["GET", "POST", "OPTIONS", "HEAD", "DELETE"],
+      "allowedHeaders": [
+        "Content-Type",
+        "Authorization",
+        "x-api-key",
+        "x-requested-with",
+        "x-anthropic-version",
+        "anthropic-version",
+        "x-olm-client",
+        "x-olm-lte-bypass"
+      ],
+      "maxAge": 86400
+    }
+  }
+}

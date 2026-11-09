@@ -1,0 +1,39 @@
+version: "3.8"
+
+services:
+  olm-router:
+    build: .
+    container_name: olm-router
+    restart: unless-stopped
+    ports:
+      - "8045:8045"
+      - "51121:51121"
+    environment:
+      - PORT=8045
+      - HOST=0.0.0.0
+      - PANEL_DOMAIN=olm.octx.space
+      - API_DOMAIN=api-olm.octx.space
+      - WAPI_DOMAIN=wapi-olm.octx.space
+      - UPSTREAM_PROXY=${UPSTREAM_PROXY:-http://127.0.0.1:10859}
+      - BACKUP_PROXY=${BACKUP_PROXY:-http://127.0.0.1:10809}
+      - ADMIN_TOKEN=${ADMIN_TOKEN:-olm-master-change-me-secret-token}
+      - DATA_DIR=/app/data
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config:ro
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: olm-caddy
+    restart: unless-stopped
+    network_mode: "host"
+    volumes:
+      - ./config/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - olm-router
+
+volumes:
+  caddy_data:
+  caddy_config:

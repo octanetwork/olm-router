@@ -1,0 +1,35 @@
+{
+  "domains": {
+    "panel": {
+      "host": "olm.octx.space",
+      "description": "Main web dashboard and administrative control panel",
+      "type": "frontend",
+      "defaultRoute": "/panel",
+      "allowPublic": true
+    },
+    "api": {
+      "host": "api-olm.octx.space",
+      "description": "Primary high-performance API for LLM inference, Claude Code & OAuth",
+      "type": "api",
+      "defaultRoute": "/v1/messages",
+      "allowPublic": true,
+      "rateLimit": {
+        "requestsPerMinute": 120,
+        "burst": 30
+      }
+    },
+    "wapi": {
+      "host": "wapi-olm.octx.space",
+      "description": "Whitelisted emergency IP endpoint for uninterrupted access through LTE / TSPU / mobile restrictions",
+      "type": "wapi",
+      "defaultRoute": "/v1/messages",
+      "allowPublic": true,
+      "lteOptimized": true,
+      "priorityQueue": true,
+      "rateLimit": {
+        "requestsPerMinute": 180,
+        "burst": 50
+      }
+    }
+  }
+}

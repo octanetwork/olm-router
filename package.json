@@ -1,0 +1,32 @@
+{
+  "name": "olm-router",
+  "version": "1.0.0",
+  "description": "Universal LLM router with Google OAuth Antigravity, multi-provider failover, Claude Code API, protection & web panel",
+  "main": "src/server.mjs",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.mjs",
+    "dev": "node --watch src/server.mjs",
+    "test": "node test/test_router.mjs"
+  },
+  "keywords": [
+    "llm",
+    "router",
+    "google-oauth",
+    "antigravity",
+    "claude-code",
+    "gemini",
+    "deepseek",
+    "qwen",
+    "proxy",
+    "firewall"
+  ],
+  "author": "genkauzen (Octa Network)",
+  "license": "MIT",
+  "dependencies": {
+    "undici": "^6.21.0"
+  },
+  "optionalDependencies": {
+    "@rezaparsian/deepseek-pow-solver": "^0.1.0"
+  }
+}
