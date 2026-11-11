@@ -6,3 +6,9 @@ data/
 .DS_Store
 *.bak
 .claude/
+
+.env.*
+!.env.example
+egress.json
+backups/
+bootstrap.json
