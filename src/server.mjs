@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Store, Fault, requireThat, digest, secret } from "./core/store.mjs";
 import { Antigravity } from "./core/provider.mjs";
-import { gateway } from "./api/gateway.mjs";
+import { gateway, candidates } from "./api/gateway.mjs";
 const publicDir = fileURLToPath(new URL("./frontend/public/", import.meta.url));
 export async function readJson(req, max = 2 * 1024 * 1024) {
   const chunks = [];
@@ -111,7 +111,7 @@ export async function createApplication({
         );
         res.setHeader(
           "Access-Control-Allow-Headers",
-          "Content-Type, Authorization, x-api-key, x-csrf-token, anthropic-version",
+          "Content-Type, Authorization, x-api-key, x-goog-api-key, x-csrf-token, anthropic-version",
         );
         res.writeHead(204);
         return res.end();
@@ -523,6 +523,7 @@ export async function createApplication({
       if (p.startsWith("/v1/") || p.startsWith("/v1beta/")) {
         const key =
           req.headers["x-api-key"] ||
+          req.headers["x-goog-api-key"] ||
           (req.headers.authorization?.startsWith("Bearer ")
             ? req.headers.authorization.slice(7)
             : null);
@@ -550,6 +551,7 @@ export async function createApplication({
                 supportedGenerationMethods: [
                   "generateContent",
                   "streamGenerateContent",
+                  "countTokens",
                 ],
               })),
             });
@@ -566,7 +568,7 @@ export async function createApplication({
           method === "POST" &&
           (p === "/v1/messages" ||
             p === "/v1/chat/completions" ||
-            /^\/v1beta\/models\/[^/]+:(streamGenerateContent|generateContent)$/.test(
+            /^\/v1beta\/models\/[^/]+:(streamGenerateContent|generateContent|countTokens)$/.test(
               p,
             ))
         ) {
@@ -584,13 +586,31 @@ export async function createApplication({
             if (p.startsWith("/v1beta")) {
               protocol = "gemini";
               const m = p.match(
-                /^\/v1beta\/models\/([^/]+):(streamGenerateContent|generateContent)$/,
+                /^\/v1beta\/models\/([^/]+):(streamGenerateContent|generateContent|countTokens)$/,
               );
               requireThat(
                 Array.isArray(body.contents) && body.contents.length > 0,
                 400,
                 "Требуется contents",
               );
+              if (m[2] === "countTokens") {
+                const allowed = candidates(store, user, m[1]);
+                requireThat(
+                  allowed.length,
+                  409,
+                  "Нет доступного аккаунта для подсчёта токенов",
+                );
+                return json(
+                  res,
+                  200,
+                  await provider.countTokens(
+                    allowed[0],
+                    m[1],
+                    body.contents,
+                    controller.signal,
+                  ),
+                );
+              }
               nativeRequest = body;
               body = {
                 model: m[1],

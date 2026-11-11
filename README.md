@@ -74,12 +74,25 @@ Streaming и function tools преобразуются в формат OpenAI. R
 
 ```sh
 curl 'https://api-olm.octx.space/v1beta/models/MODEL_FROM_V1_MODELS:generateContent' \
-  -H 'x-api-key: YOUR_OLM_KEY' \
+  -H 'x-goog-api-key: YOUR_OLM_KEY' \
   -H 'Content-Type: application/json' \
   -d '{"contents":[{"role":"user","parts":[{"text":"Привет"}]}],"generationConfig":{"maxOutputTokens":1024}}'
 ```
 
 Для SSE используйте `:streamGenerateContent?alt=sse`. Этот API не превращает подписку Google AI Pro в оплаченный Google Cloud billing project. У Google API [отдельный порядок биллинга](https://ai.google.dev/gemini-api/docs/billing).
+
+### Gemini CLI
+
+```sh
+export GEMINI_API_KEY='YOUR_OLM_KEY'
+export GOOGLE_GEMINI_BASE_URL='https://api-olm.octx.space'
+export GOOGLE_GENAI_API_VERSION='v1beta'
+gemini --model 'MODEL_FROM_V1_MODELS'
+```
+
+Выберите API key в `/auth`. Это поддерживаемый [способ указания base URL](https://geminicli.com/docs/reference/configuration/), проверенный с Gemini CLI 0.61.0. Режимы Login with Google и Vertex AI не направляют авторизацию в OLM. Локальный `agy` на Mac является запускателем OmniCode; его нельзя считать стандартным Gemini CLI или обещать ему замену Google OAuth без отдельной настройки.
+
+Нативный SDK использует `x-goog-api-key`. Endpoint `:countTokens` возвращает точное значение Antigravity для `contents`, без оценки и списания credits.
 
 ### Матрица
 
@@ -91,7 +104,8 @@ curl 'https://api-olm.octx.space/v1beta/models/MODEL_FROM_V1_MODELS:generateCont
 | Gemini streamGenerateContent | OLM API-ключ | Реализован, требуется отдельный smoke test |
 | Claude Code 2.1.319 | Base URL и OLM API-ключ | Проверены ответ и реальный вызов Read с возвратом результата в изолированном профиле |
 | Claude Desktop | Зависит от версии приложения | Не заявлен как совместимый; вымышленных настроек конфигурации нет |
-| Gemini CLI / Antigravity IDE | Зависит от режима и версии | Google OAuth этих приложений не эмулируется |
+| Gemini CLI 0.61.0 | OLM API-ключ, GOOGLE_GEMINI_BASE_URL | Проверен реальный запрос в изолированном профиле |
+| Antigravity IDE / OmniCode agy | Зависит от режима и версии | Google OAuth этих приложений не эмулируется |
 | OpenAI Responses | OLM API-ключ | Не реализован |
 
 ## Google OAuth

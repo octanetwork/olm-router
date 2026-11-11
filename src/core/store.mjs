@@ -343,6 +343,8 @@ export class Store {
     return { refreshToken: data.refreshToken, projectId: data.projectId };
   }
   saveAccount(userId, data) {
+    const owner = this.user(userId);
+    requireThat(owner, 403, "Учётная запись отключена");
     requireThat(
       typeof data.email === "string" &&
         data.email.includes("@") &&
@@ -378,6 +380,11 @@ export class Store {
           projectId: data.projectId,
         }),
       );
+    const settings = JSON.parse(owner.settings);
+    if (!settings.accountId)
+      this.db
+        .prepare("UPDATE users SET settings=? WHERE id=?")
+        .run(JSON.stringify({ ...settings, accountId: id }), userId);
     this.audit(userId, "account.connect", id);
     return this.accountSafe(
       this.db.prepare("SELECT * FROM accounts WHERE id=?").get(id),

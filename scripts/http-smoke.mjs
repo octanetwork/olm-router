@@ -65,6 +65,41 @@ try {
   if (!streaming.text.includes("message_stop"))
     throw new Error("stream did not finish");
   console.log("Anthropic streaming passed");
+  const openAIStream = await call("/v1/chat/completions", {
+    model: body.model,
+    messages: [{ role: "user", content: "Reply OK only." }],
+    max_tokens: 128,
+    stream: true,
+  });
+  if (
+    !openAIStream.text.includes("[DONE]") ||
+    !openAIStream.text.includes("chat.completion.chunk")
+  )
+    throw new Error("OpenAI stream failed");
+  console.log("OpenAI streaming passed");
+  const geminiStream = await call(
+    `/v1beta/models/${body.model}:streamGenerateContent?alt=sse`,
+    {
+      contents: [{ role: "user", parts: [{ text: "Reply OK only." }] }],
+      generationConfig: { maxOutputTokens: 128 },
+    },
+  );
+  if (
+    !geminiStream.text.includes("usageMetadata") ||
+    geminiStream.text.includes("message_start")
+  )
+    throw new Error("Gemini stream failed");
+  console.log("Gemini streaming passed");
+  const count = JSON.parse(
+    (
+      await call(`/v1beta/models/${body.model}:countTokens`, {
+        contents: [{ role: "user", parts: [{ text: "Hello" }] }],
+      })
+    ).text,
+  );
+  if (!Number.isSafeInteger(count.totalTokens))
+    throw new Error("Count tokens failed");
+  console.log("Exact token count passed:", count.totalTokens);
   const tools = [
     {
       name: "lookup",

@@ -115,6 +115,7 @@ await test("bootstrap, sessions and encrypted storage", async () => {
   );
   assert.equal(a.email, "**lice@gmail.com");
   assert.equal(a.credentials, undefined);
+  assert.equal(JSON.parse(store.user(user.id).settings).accountId, a.id);
   store.db
     .prepare("UPDATE accounts SET quota=?,checked=? WHERE id=?")
     .run(
@@ -712,6 +713,49 @@ await test("OAuth callback is single-use and reconnect clears stale quotas", asy
   else process.env.ANTIGRAVITY_CLIENT_ID = oldId;
   if (oldSecret === undefined) delete process.env.ANTIGRAVITY_CLIENT_SECRET;
   else process.env.ANTIGRAVITY_CLIENT_SECRET = oldSecret;
+});
+await test("native SDK key header and exact token count endpoint", async () => {
+  const key = store.createKey(store.user(user.id), "native sdk");
+  let called = false;
+  provider.countTokens = async (a, m, contents) => {
+    called = true;
+    assert.equal(m, "gemini-test");
+    assert.equal(contents[0].parts[0].text, "Hi");
+    return { totalTokens: 7 };
+  };
+  const response = await fetch(
+    base + "/v1beta/models/gemini-test:countTokens",
+    {
+      method: "POST",
+      headers: {
+        "x-goog-api-key": key.key,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: "Hi" }] }],
+      }),
+    },
+  );
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { totalTokens: 7 });
+  assert.equal(called, true);
+  store.db.prepare("UPDATE users SET enabled=0 WHERE id=?").run(other.id);
+  assert.throws(
+    () =>
+      store.saveAccount(other.id, {
+        email: "blocked@gmail.com",
+        refreshToken: "blocked",
+      }),
+    { status: 403 },
+  );
+  store.db.prepare("UPDATE users SET enabled=1 WHERE id=?").run(other.id);
+  const models = await fetch(base + "/v1beta/models", {
+    headers: { "x-goog-api-key": key.key },
+  });
+  assert.equal(models.status, 200);
+  assert.ok(
+    (await models.json()).models.some((m) => m.name === "models/gemini-test"),
+  );
 });
 test.after(async () => {
   await new Promise((r) => server.close(r));

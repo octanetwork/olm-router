@@ -436,6 +436,7 @@ async function connectGoogle() {
         const r = await api("/api/accounts/callback", "POST", b);
         d.close();
         notify(r.warning || "Аккаунт подключён");
+        await refreshMe();
         await navigate("accounts");
       },
       "Подключить",
@@ -702,12 +703,19 @@ async function clientsView(main) {
       note: "Для совместимого клиента: base URL https://api-olm.octx.space/v1. Поддерживаются Chat Completions, streaming и инструменты. Responses пока недоступен.",
     },
     "Gemini API": {
-      text: `curl 'https://api-olm.octx.space/v1beta/models/${model}:generateContent' \\\n  -H "x-api-key: YOUR_OLM_KEY" \\\n  -H "Content-Type: application/json" \\\n  -d '{"contents":[{"role":"user","parts":[{"text":"Привет"}]}],"generationConfig":{"maxOutputTokens":1024}}'`,
+      text: `curl 'https://api-olm.octx.space/v1beta/models/${model}:generateContent' \\\n  -H "x-goog-api-key: YOUR_OLM_KEY" \\\n  -H "Content-Type: application/json" \\\n  -d '{"contents":[{"role":"user","parts":[{"text":"Привет"}]}],"generationConfig":{"maxOutputTokens":1024}}'`,
       note: "Gemini generateContent и streamGenerateContent. Подписка Google AI Pro не включает Google Cloud API billing.",
+    },
+    "Gemini CLI": {
+      text: `export GEMINI_API_KEY="YOUR_OLM_KEY"
+export GOOGLE_GEMINI_BASE_URL="https://api-olm.octx.space"
+export GOOGLE_GENAI_API_VERSION="v1beta"
+gemini --model "${model}"`,
+      note: "В /auth выберите API key. Проверено с Gemini CLI 0.61.0. Вход Google OAuth и Vertex billing у клиента используют другие маршруты.",
     },
     "Другие клиенты": {
       text: `curl https://api-olm.octx.space/v1/models \\\n  -H "Authorization: Bearer YOUR_OLM_KEY"`,
-      note: "Claude Desktop, Gemini CLI и Antigravity IDE требуют отдельной проверки версии и способа входа. Их Google/Anthropic OAuth нельзя заменить адресом этого API. Пока не заявлены как совместимые.",
+      note: "Claude Desktop и Antigravity IDE требуют отдельной проверки версии и способа входа. Их Google/Anthropic OAuth нельзя заменить адресом этого API. Пока не заявлены как совместимые.",
     },
   };
   const select = (name) => {
