@@ -178,6 +178,40 @@ await test("closed routes, csrf and cookie security", async () => {
   assert.equal(login.status, 200);
   assert.match(login.headers.get("set-cookie"), /HttpOnly/);
   assert.match(login.headers.get("set-cookie"), /SameSite=Strict/);
+  const secured = await createApplication({
+    store,
+    provider,
+    secure: true,
+    panelOrigin: "https://olm.octx.space",
+  });
+  await new Promise((r) => secured.listen(0, "127.0.0.1", r));
+  const address = "http://127.0.0.1:" + secured.address().port;
+  try {
+    const legacy = await fetch(address + "/api/me", { headers: { cookie } });
+    assert.equal(legacy.status, 401);
+    await legacy.arrayBuffer();
+    const signed = await fetch(address + "/api/login", {
+      method: "POST",
+      headers: {
+        Origin: "https://olm.octx.space",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ login: "alice", password: "test-password-12345" }),
+    });
+    assert.equal(signed.status, 200);
+    const securedCookie = signed.headers.get("set-cookie");
+    assert.match(securedCookie, /^__Host-olm_session=/);
+    assert.match(securedCookie, /; Secure/);
+    assert.ok(!securedCookie.includes("Domain="));
+    await signed.arrayBuffer();
+    const current = await fetch(address + "/api/me", {
+      headers: { cookie: securedCookie.split(";")[0] },
+    });
+    assert.equal(current.status, 200);
+    await current.arrayBuffer();
+  } finally {
+    await new Promise((r) => secured.close(r));
+  }
 });
 await test("role and object ownership enforcement", async () => {
   const normal = await store.login("alice", "test-password-12345");
@@ -371,7 +405,6 @@ await test("shared billing requires price and balance, tracks exact usage", asyn
     store.db.prepare("SELECT count(*) AS n FROM reservations").get().n,
     0,
   );
-  provider.generate = async () => sse([{ text: "unknown usage" }], undefined); // undefined uses default, use explicit null below
   provider.generate = async () => sse([{ text: "unknown usage" }], null);
   const unknown = await request("/v1/messages", {
     method: "POST",
@@ -395,6 +428,14 @@ await test("shared billing requires price and balance, tracks exact usage", asyn
     409,
   );
   provider.generate = async () => sse();
+  store.transfer(admin, manager.id, 100000, "isolated pool check");
+  const peerKey = store.createKey(store.user(manager.id), "peer");
+  const peer = await request("/v1/messages", {
+    method: "POST",
+    body: payload,
+    key: peerKey.key,
+  });
+  assert.equal(peer.status, 200, peer.text);
   const pending = store.db.prepare("SELECT * FROM reservations").get();
   store.settle(pending.id, 0);
 });
