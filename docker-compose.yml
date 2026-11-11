@@ -1,39 +1,46 @@
-version: "3.8"
-
 services:
   olm-router:
     build: .
+    image: olm-router:${OLM_RELEASE:-local}
     container_name: olm-router
     restart: unless-stopped
-    ports:
-      - "8045:8045"
-      - "51121:51121"
+    init: true
+    user: '1000:1000'
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+    pids_limit: 100
+    env_file: .env
     environment:
-      - PORT=8045
-      - HOST=0.0.0.0
-      - PANEL_DOMAIN=olm.octx.space
-      - API_DOMAIN=api-olm.octx.space
-      - WAPI_DOMAIN=wapi-olm.octx.space
-      - UPSTREAM_PROXY=${UPSTREAM_PROXY:-http://127.0.0.1:10859}
-      - BACKUP_PROXY=${BACKUP_PROXY:-http://127.0.0.1:10809}
-      - ADMIN_TOKEN=${ADMIN_TOKEN:-olm-master-change-me-secret-token}
-      - DATA_DIR=/app/data
-    volumes:
-      - ./data:/app/data
-      - ./config:/app/config:ro
-
-  caddy:
-    image: caddy:2-alpine
-    container_name: olm-caddy
+      NODE_ENV: production
+      DATA_DIR: /app/data
+      OLM_PANEL_ORIGIN: https://olm.octx.space
+      OLM_PROXY_ROUTES: http://olm-egress:1080
+      OLM_TRUSTED_PROXIES: ${OLM_CADDY_IP:?set the exact ingress address}
+    ports: ['127.0.0.1:18045:8045']
+    volumes: ['./data:/app/data']
+    tmpfs: ['/tmp:size=16m,mode=1777']
+    networks: [default, ingress]
+    logging:
+      driver: json-file
+      options: {max-size: '5m', max-file: '3'}
+  olm-egress:
+    image: ${OLM_EGRESS_IMAGE:?pin the existing xray image digest}
+    container_name: olm-egress
     restart: unless-stopped
-    network_mode: "host"
-    volumes:
-      - ./config/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
-    depends_on:
-      - olm-router
-
-volumes:
-  caddy_data:
-  caddy_config:
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    mem_limit: 128m
+    pids_limit: 50
+    command: ['run', '-config', '/etc/xray/config.json']
+    volumes: ['./egress.json:/etc/xray/config.json:ro']
+    networks: [default]
+    logging:
+      driver: json-file
+      options: {max-size: '5m', max-file: '3'}
+networks:
+  ingress:
+    external: true
+    name: remnawave-network

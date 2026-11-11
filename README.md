@@ -1,160 +1,151 @@
-# OLM Router (Octa Network)
+# OLM Router
 
-> **Universal LLM Gateway with Google OAuth Antigravity, multi-provider failover, Claude Code API, protection & web panel.**
+Закрытый кабинет и API для доступа к моделям Antigravity. Сервис работает на VPS без запущенного Claude Desktop и без зависимости от Mac владельца.
 
-OLM Router is an enterprise-grade LLM routing and proxy engine built for the Octa ecosystem. It originates from the Antigravity session **"Claude Code Google OAuth Integration"**, evolving into a standalone microservice featuring frontend management, multi-provider resilience, and LTE whitelist protection.
+- Кабинет: `https://olm.octx.space`
+- API: `https://api-olm.octx.space`
+- Требования к изменениям: [AGENTS.md](AGENTS.md)
 
----
+Регистрация закрыта. Superadmin создаёт администраторов и пользователей; администраторы управляют только своими пользователями и выдают credits из выделенного бюджета. Вход в кабинет отделён от подключения Google.
 
-## 🌐 Domains Architecture
+## Аккаунты и лимиты
 
-| Domain | Type | Purpose | Features |
-| :--- | :--- | :--- | :--- |
-| **`olm.octx.space`** | Web Panel | Main management dashboard | One-click Google OAuth login, account switcher, API key management, client configs, real-time playground. |
-| **`api-olm.octx.space`** | Primary API | High-performance inference endpoint | Full Claude Code (`/v1/messages`), OpenAI (`/v1/chat/completions`), token counting, SSE streaming, multi-provider routing. |
-| **`wapi-olm.octx.space`** | LTE Reserve | Emergency whitelisted IP gateway | Direct IP routing bypass, TSPU/mobile carrier block resilience, priority request queue, optimized TCP keepalive. |
+Подключённый Google-аккаунт по умолчанию приватный. Его использование расходует квоту провайдера без списания credits. Администратор может явно опубликовать свой аккаунт в общем пуле. Пользователь без собственного аккаунта получает доступ к этому пулу только с настроенной ценой модели и достаточным балансом.
 
----
+В режиме Deadswitch запрос останавливается, когда выбранный аккаунт недоступен. Автопереключение использует следующие собственные аккаунты. Переход со своих аккаунтов на общий пул включается отдельно и означает списание credits. После первого содержательного chunk переключение запрещено.
 
-## ⚡ Features & Capabilities
+Модели и квоты запрашиваются у провайдера, обновляются каждые пять минут и по кнопке. Отсутствующее значение не заменяется вымышленным процентом. Из выдачи исключаются внутренние, отключённые и модели генерации изображений, для которых адаптер не реализован.
 
-1. **Google Antigravity OAuth Bridge**:
-   - Native integration with Google Cloud Code / Antigravity (`https://daily-cloudcode-pa.googleapis.com`).
-   - Supports **Gemini 3.8 Flash**, **Gemini 3.8 Flash-Lite**, and **Thinking Level/Budget** controls (`low`, `medium`, `high`, `max`).
-   - Thought signatures preservation (`signatureStore`) for seamless multi-turn tool loops.
-   - Inject system instructions into the first turn to prevent Cloud Code PA `systemInstruction` 429 quota exhaustion.
-   - Automatic token refresh and Google Cloud project ID discovery.
+## Credits
 
-2. **Claude Code Full Emulation**:
-   - 100% compatible with Claude Code CLI and Claude Desktop (`/v1/messages`, `/v1/models`, `/v1/messages/count_tokens`, `/api/claude_cli/bootstrap`).
-   - Convert Anthropic tool use & result structures into Google Gemini function calling and back into Anthropic SSE stream events.
+1 credit = 1 000 000 минимальных единиц. Цены задаёт superadmin: credits за миллион входных и выходных токенов. Цены по умолчанию отсутствуют; платный пул без цены закрыт.
 
-3. **Multi-Provider Fallback**:
-   - **Google Antigravity**: Gemini 3.8 Flash, Flash-Lite, Thinking.
-   - **Alibaba Qwen**: Qwen 2.5 Coder 32B, Qwen Max, QwQ Reasoning.
-   - **DeepSeek AI**: DeepSeek Chat V3, DeepSeek Reasoner R1.
-   - **CheapVibeCode**: Custom gateway proxy.
-   - **Nvidia NIM**: Llama 3.3 70B Instruct, Mistral.
+Перед платным запросом резервируется верхняя граница расхода. По завершении используется точный usage провайдера; output включает reasoning-токены, cached input тарифицируется как обычный input. Повторное завершение не создаёт второго списания. Если итоговый usage потерян, резерв сохраняется до ручной сверки superadmin, а аккаунт временно исключается из новых назначений. После перезапуска незавершённые запросы также требуют сверки.
 
-4. **Security & Protection Layer ("Защита")**:
-   - **Sliding-window Rate Limiter**: Configurable requests per minute, burst protection, automatic temporary ban on abusive clients.
-   - **IP & CIDR Firewall**: Whitelist and blacklist filtering.
-   - **LTE Whitelist Mode (`wapi-olm.octx.space`)**: Priority access with `x-olm-lte-bypass` support for restricted mobile networks.
-   - **Anti-DDoS & Payload Protection**: Request size capping (20MB default), malicious User-Agent blocking.
-   - **API Key Guard**: Generate, track, and revoke client API keys (`olm_live_...`).
+Календарь группирует запросы по часовому поясу браузера. Промпты и ответы в БД не сохраняются. Сохраняются модель, источник, токены, credits, состояние и время запроса. Неподтверждённый usage показывается отдельно.
 
-5. **Context Compaction Engine**:
-   - Intelligent token budgeting (`compactAnthropicMessages`) prevents upstream context overflow errors by pruning historical tool outputs while keeping system prompts and active conversation state intact.
+## Подключение клиентов
 
----
+Создайте ключ в кабинете. Полностью он показывается один раз. Реальные ID моделей вернёт:
 
-## 🚀 Quick Start
-
-### 1. Local Run
-
-```bash
-cd olm-router
-npm install
-npm start
+```sh
+curl https://api-olm.octx.space/v1/models \
+  -H 'Authorization: Bearer YOUR_OLM_KEY'
 ```
 
-Default port is `8045`. Access the dashboard at `http://localhost:8045`.
+### Anthropic Messages
 
-### 2. Docker & Docker Compose
-
-```bash
-docker compose up -d
+```sh
+curl https://api-olm.octx.space/v1/messages \
+  -H 'x-api-key: YOUR_OLM_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"MODEL_FROM_V1_MODELS","max_tokens":1024,"stream":false,"messages":[{"role":"user","content":"Привет"}]}'
 ```
 
----
+Для streaming установите `stream: true`. В адаптере Anthropic/OpenAI системные инструкции, включая сообщения `role: system` из новых клиентов, кодируются в первом пользовательском turn по схеме исходного моста. Это отличается от нативного `systemInstruction` Gemini и позволяет избежать наблюдавшихся 429 на этом поле. Поддерживаются текст, входные base64-изображения, инструменты с приведением JSON Schema к подмножеству Gemini, tool results и сохранение thought signatures в пределах аккаунта, API-ключа и процесса. После перезапуска продолжение старого tool-цикла с подписями может потребовать нового диалога.
 
-## 🛠 Client Integration Guides
+### Claude Code
 
-### Claude Code CLI
-
-```bash
-export ANTHROPIC_BASE_URL="https://api-olm.octx.space"
-export ANTHROPIC_API_KEY="olm_live_your_api_key"
-claude
+```sh
+export ANTHROPIC_BASE_URL='https://api-olm.octx.space'
+export ANTHROPIC_AUTH_TOKEN='YOUR_OLM_KEY'
+export ANTHROPIC_MODEL='MODEL_FROM_V1_MODELS'
+claude --setting-sources ""
 ```
 
-### Claude Desktop (`claude_desktop_config.json`)
+Если в прежнем `settings.json` уже задан другой gateway, используйте отдельный профиль или запуск с `--setting-sources ""`, чтобы его переменные не переопределяли OLM.
 
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+Это подключение через формат Anthropic, а не вход Claude OAuth. Реальная модель остаётся моделью Antigravity. Anthropic описывает [подключение gateways](https://code.claude.com/docs/en/llm-gateway), но не поддерживает использование Claude Code с моделями других производителей. Версию клиента и результат отдельной проверки фиксируем в deployment-артефакте.
 
-```json
-{
-  "inferenceGateways": {
-    "default": {
-      "baseUrl": "https://api-olm.octx.space",
-      "apiKey": "olm_live_your_api_key"
-    }
-  }
-}
+### OpenAI Chat Completions
+
+Base URL для совместимого SDK: `https://api-olm.octx.space/v1`.
+
+```sh
+curl https://api-olm.octx.space/v1/chat/completions \
+  -H 'Authorization: Bearer YOUR_OLM_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"MODEL_FROM_V1_MODELS","max_tokens":1024,"stream":false,"messages":[{"role":"user","content":"Привет"}]}'
 ```
 
-### LTE Emergency Whitelist Access (`wapi`)
+Streaming и function tools преобразуются в формат OpenAI. Responses API не реализован и возвращает 404. Для изображений используйте Anthropic или Gemini endpoint.
 
-When standard API traffic is throttled by mobile operators or TSPU:
+### Gemini generateContent
 
-```bash
-export ANTHROPIC_BASE_URL="https://wapi-olm.octx.space"
-export ANTHROPIC_API_KEY="olm_live_your_api_key"
-export ANTHROPIC_CUSTOM_HEADERS="x-olm-lte-bypass: octa-lte-emergency"
-claude
+```sh
+curl 'https://api-olm.octx.space/v1beta/models/MODEL_FROM_V1_MODELS:generateContent' \
+  -H 'x-goog-api-key: YOUR_OLM_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{"contents":[{"role":"user","parts":[{"text":"Привет"}]}],"generationConfig":{"maxOutputTokens":1024}}'
 ```
 
-### Cursor / OpenAI Clients
+Для SSE используйте `:streamGenerateContent?alt=sse`. Этот API не превращает подписку Google AI Pro в оплаченный Google Cloud billing project. У Google API [отдельный порядок биллинга](https://ai.google.dev/gemini-api/docs/billing).
 
-- **Base URL**: `https://api-olm.octx.space/v1`
-- **API Key**: `olm_live_your_api_key`
-- **Models**: `claude-3-8-flash`, `claude-qn-coder`, `claude-seek-r1`
+### Gemini CLI
 
----
-
-## 📁 Repository Structure
-
-```
-olm-router/
-├── config/
-│   ├── domains.json          # Domain topology definition
-│   ├── providers.json        # Provider configurations
-│   ├── security.json         # Firewall, rate limits & whitelist rules
-│   └── caddy/Caddyfile       # Caddy reverse proxy config with auto-TLS
-├── src/
-│   ├── server.mjs            # Main HTTP server & host dispatcher
-│   ├── core/
-│   │   ├── oauth.mjs         # Google Antigravity OAuth flow & token management
-│   │   ├── accounts.mjs      # Account persistence & switching
-│   │   ├── context.mjs       # Context compaction & token budgeting
-│   │   └── proxy.mjs         # Upstream proxy pool (Xray/SOCKS5/HTTP) & failover
-│   ├── providers/
-│   │   ├── antigravity.mjs   # Google Cloud Code Gemini engine & tool conversion
-│   │   ├── qwen.mjs          # Alibaba DashScope adapter
-│   │   ├── deepseek.mjs      # DeepSeek V3/R1 adapter
-│   │   ├── cheapvibecode.mjs # CheapVibeCode gateway adapter
-│   │   ├── nvidia.mjs        # Nvidia NIM adapter
-│   │   └── registry.mjs      # Unified model resolver
-│   ├── security/
-│   │   ├── firewall.mjs      # IP filtering, LTE whitelist check & anti-DDoS
-│   │   ├── ratelimit.mjs     # Sliding window rate limiter
-│   │   ├── auth-guard.mjs    # API key generation & validation
-│   │   └── cors.mjs          # CORS & security headers
-│   ├── api/
-│   │   ├── claude.mjs        # Anthropic /v1/messages compatible endpoints
-│   │   ├── openai.mjs        # OpenAI /v1/chat/completions compatible endpoints
-│   │   └── admin.mjs         # Admin metrics, key management & status
-│   └── frontend/
-│       ├── public/           # Web panel assets (index.html, styles.css, app.js)
-│       └── serve.mjs         # Static asset streaming handler
-├── Dockerfile
-├── docker-compose.yml
-├── package.json
-└── README.md
+```sh
+export GEMINI_API_KEY='YOUR_OLM_KEY'
+export GOOGLE_GEMINI_BASE_URL='https://api-olm.octx.space'
+export GOOGLE_GENAI_API_VERSION='v1beta'
+gemini --model 'MODEL_FROM_V1_MODELS'
 ```
 
----
+Выберите API key в `/auth`. Это поддерживаемый [способ указания base URL](https://geminicli.com/docs/reference/configuration/), проверенный с Gemini CLI 0.61.0. Режимы Login with Google и Vertex AI не направляют авторизацию в OLM. Локальный `agy` на Mac является запускателем OmniCode; его нельзя считать стандартным Gemini CLI или обещать ему замену Google OAuth без отдельной настройки.
 
-## 📜 License & Attribution
+Нативный SDK использует `x-goog-api-key`. Endpoint `:countTokens` возвращает точное значение Antigravity для `contents`, без оценки и списания credits.
 
-Part of the **Octa Network** ecosystem. Created by `@genkauzen`. MIT License.
+### Матрица
+
+| Клиент или формат | Способ доступа | Статус |
+| --- | --- | --- |
+| Anthropic Messages | OLM API-ключ | Проверен с настоящим upstream: обычный ответ, SSE, tool roundtrip |
+| OpenAI Chat Completions | OLM API-ключ | Проверен обычный ответ; формат SSE и tools покрыт тестами |
+| Gemini generateContent | OLM API-ключ | Проверен обычный ответ |
+| Gemini streamGenerateContent | OLM API-ключ | Реализован, требуется отдельный smoke test |
+| Claude Code 2.1.319 | Base URL и OLM API-ключ | Проверены ответ и реальный вызов Read с возвратом результата в изолированном профиле |
+| Claude Desktop | Зависит от версии приложения | Не заявлен как совместимый; вымышленных настроек конфигурации нет |
+| Gemini CLI 0.61.0 | OLM API-ключ, GOOGLE_GEMINI_BASE_URL | Проверен реальный запрос в изолированном профиле |
+| Antigravity IDE / OmniCode agy | Зависит от режима и версии | Google OAuth этих приложений не эмулируется |
+| OpenAI Responses | OLM API-ключ | Не реализован |
+
+## Google OAuth
+
+Используется authorization code + PKCE S256, одноразовый state с TTL 10 минут, привязанный к сессии владельца. Пароль вводится только на странице Google. Refresh tokens зашифрованы AES-256-GCM, bearer-ключи и сессии хранятся в виде SHA-256-хешей. Пароли хешируются scrypt с уникальной солью.
+
+Текущий desktop OAuth-клиент использует loopback redirect. После входа нужно скопировать полный адрес возврата `http://localhost:51121/oauth-callback?...` в кабинет, даже если браузер не открыл локальную страницу. Коды не попадают в URL кабинета и access logs. Для бесшовного web callback потребуется отдельный допустимый web OAuth-клиент и проверка доступа к Antigravity; произвольная замена redirect URI не работает. См. [официальное описание desktop OAuth](https://developers.google.com/identity/protocols/oauth2/native-app).
+
+Шифрование не скрывает данные от администратора VPS, имеющего доступ одновременно к БД и ключу шифрования. MFA пока не реализован; не считать эту версию соответствующей корпоративному профилю ASVS или ГОСТ.
+
+## Разработка
+
+Node.js 24 или новее:
+
+```sh
+npm ci --ignore-scripts
+npm test
+npm run lint
+npm run build
+```
+
+Для локального запуска задайте `DATA_DIR`, `OLM_ENCRYPTION_KEY` (64 hex), `OLM_PANEL_ORIGIN`, OAuth client ID/secret и `OLM_PROXY_ROUTES`. Маршруты перечисляются через запятую; `direct` разрешён только как явно выбранный маршрут. Production compose использует только отдельный `olm-egress`.
+
+```sh
+node --env-file=/private/path/olm.env scripts/provision.mjs /private/path/bootstrap.json
+node --env-file=/private/path/olm.env src/server.mjs
+```
+
+Bootstrap-файл содержит массив `{login,password,role}`, создаёт только отсутствующих пользователей и удаляется после успешного применения. Отдельный разрешённый импорт активного аккаунта OpenCode:
+
+```sh
+node --env-file=/private/path/olm.env scripts/provision.mjs '' /private/path/antigravity-accounts.json
+```
+
+Не направляйте тесты на production data. Старые модули `src/api/claude.mjs`, `src/api/openai.mjs`, `src/core/oauth.mjs` и прежние security/provider-модули не подключены новым сервером и не включаются в production-образ. Существующий WIP в них сохранён.
+
+## Production
+
+Compose поднимает только OLM и отдельный Xray egress. Порт приложения публикуется на `127.0.0.1:18045`. Caddy подключается через существующую `remnawave-network`; доверенный IP Caddy задаётся точно, без доверия ко всем private ranges. Общий Caddy не заменяется: добавляются два site-блока из `config/caddy/Caddyfile` после backup и validation.
+
+`.env`, `egress.json`, данные и резервные копии исключены из Git и build context. Секреты не включаются в образ. Образ Node закреплён digest, npm использует lockfile. SQLite WAL рассчитан на один экземпляр приложения на этом VPS. Для нескольких процессов нужна отдельная архитектура очередей, лимитов и сверки резервов.
+
+Перед обновлением сделайте online backup SQLite, отдельно сохраните ключ шифрования, закрепите работающий image и подготовьте rollback. Перезапуск Docker daemon, бота, Remnawave и существующих proxy не требуется. Результаты развёртывания и откат: `../artifacts/20261111-olm-router/README.md`.

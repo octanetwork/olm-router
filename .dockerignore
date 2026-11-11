@@ -1,0 +1,14 @@
+.git
+node_modules
+data
+.env
+.env.*
+!.env.example
+*.log
+*.bak
+.claude
+artifacts
+
+egress.json
+backups
+bootstrap.json
