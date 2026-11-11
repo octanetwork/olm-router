@@ -10,6 +10,12 @@ export class Transport {
     }));
   }
   async fetch(url, options = {}) {
+    if (options.signal?.aborted) {
+      const failure = new Fault(499, "Запрос отменён до отправки");
+      failure.dispatched = false;
+      throw failure;
+    }
+    const generation = url.includes(":streamGenerateContent");
     let last;
     for (const route of this.routes.filter((r) => r.until <= Date.now())) {
       try {
@@ -21,17 +27,38 @@ export class Transport {
         route.until = 0;
         return r;
       } catch (e) {
-        if (options.signal?.aborted) throw e;
-        route.until = Date.now() + 30000;
+        const beforeSend = [
+          "ECONNREFUSED",
+          "ENOTFOUND",
+          "EAI_AGAIN",
+          "EHOSTUNREACH",
+          "ENETUNREACH",
+          "UND_ERR_CONNECT_TIMEOUT",
+        ].includes(e.cause?.code || e.code);
+        if (!options.signal?.aborted) route.until = Date.now() + 30000;
+        if (generation && !beforeSend) {
+          const failure = new Fault(
+            options.signal?.aborted ? 499 : 502,
+            "Результат отправленного запроса неизвестен",
+          );
+          failure.dispatched = true;
+          throw failure;
+        }
+        if (options.signal?.aborted) {
+          e.dispatched = false;
+          throw e;
+        }
         last = e;
       }
     }
-    throw new Fault(
+    const failure = new Fault(
       502,
       last
         ? "Мост провайдера недоступен"
         : "Маршруты провайдера временно недоступны",
     );
+    failure.dispatched = false;
+    throw failure;
   }
 }
 const ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
@@ -133,16 +160,26 @@ export class Antigravity {
     }
   }
   async call(account, method, body, signal) {
-    return this.transport.fetch(`${ENDPOINT}/v1internal:${method}`, {
-      method: "POST",
-      signal,
-      headers: {
-        Authorization: `Bearer ${await this.token(account, signal)}`,
-        "Content-Type": "application/json",
-        "User-Agent": AGENT,
-      },
-      body: JSON.stringify(body),
-    });
+    const token = await this.token(account, signal);
+    try {
+      return await this.transport.fetch(`${ENDPOINT}/v1internal:${method}`, {
+        method: "POST",
+        signal,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+          "User-Agent": AGENT,
+        },
+        body: JSON.stringify(body),
+      });
+    } catch (error) {
+      if (
+        method.startsWith("streamGenerateContent") &&
+        error.dispatched !== false
+      )
+        error.dispatched = true;
+      throw error;
+    }
   }
   async discover(account, signal) {
     const data = this.store.accountCredentials(account);
@@ -434,6 +471,7 @@ export class Antigravity {
       e.retryAfter = /^\d+$/.test(retry || "")
         ? Math.min(3600, Number(retry))
         : 60;
+      e.rejected = true;
       throw e;
     }
     return r;
