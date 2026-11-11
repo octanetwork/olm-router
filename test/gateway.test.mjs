@@ -803,6 +803,53 @@ await test("native SDK key header and exact token count endpoint", async () => {
     (await models.json()).models.some((m) => m.name === "models/gemini-test"),
   );
 });
+await test("accepted or uncertain paid requests retain reservations before the first output", async () => {
+  const u = await store.createUser(admin, {
+    login: "cancelled",
+    password: "test-password-12345",
+  });
+  store.transfer(admin, u.id, 100000, "allocation");
+  const key = store.createKey(store.user(u.id), "cancel test");
+  for (const mode of ["uncertain", "empty"]) {
+    provider.generate = async () => {
+      if (mode === "uncertain") {
+        const e = new Fault(502, "transport lost");
+        e.dispatched = true;
+        throw e;
+      }
+      return new Response("");
+    };
+    const result = await request("/v1/messages", {
+      method: "POST",
+      body: payload,
+      key: key.key,
+    });
+    assert.equal(result.status, 502, result.text);
+    const reservation = store.db
+      .prepare("SELECT * FROM reservations WHERE user_id=?")
+      .get(u.id);
+    assert.ok(reservation);
+    assert.ok(store.user(u.id).balance < 100000);
+    assert.equal(
+      store.db.prepare("SELECT state FROM usage WHERE id=?").get(reservation.id)
+        .state,
+      "reconcile",
+    );
+    const again = await request("/v1/messages", {
+      method: "POST",
+      body: payload,
+      key: key.key,
+    });
+    assert.equal(again.status, 409);
+    store.settle(reservation.id, 0, {
+      input: null,
+      output: null,
+      state: "reconciled",
+    });
+    assert.equal(store.user(u.id).balance, 100000);
+  }
+  provider.generate = async () => sse();
+});
 test.after(async () => {
   await new Promise((r) => server.close(r));
   store.db.close();

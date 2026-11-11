@@ -260,6 +260,12 @@ export async function gateway({
       selected = a;
       break;
     } catch (e) {
+      if (e.dispatched && !e.rejected) {
+        store.db
+          .prepare("UPDATE usage SET state=? WHERE id=?")
+          .run(reserved ? "reconcile" : "failed", id);
+        throw e;
+      }
       store.db.prepare("UPDATE usage SET state='failed' WHERE id=?").run(id);
       if (reserved) {
         store.settle(id, 0);
@@ -627,10 +633,9 @@ export async function gateway({
     res.end();
     ended = true;
   } catch (e) {
-    if (reserved && !hasContent) store.settle(id, 0);
     store.db
       .prepare("UPDATE usage SET input=?,output=?,state=? WHERE id=?")
-      .run(input, output, reserved && hasContent ? "reconcile" : "failed", id);
+      .run(input, output, reserved ? "reconcile" : "failed", id);
     if (res.headersSent && !res.destroyed) {
       if (protocol === "anthropic")
         await write(
