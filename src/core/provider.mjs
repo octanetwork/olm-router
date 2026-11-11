@@ -438,6 +438,22 @@ export class Antigravity {
     }
     return r;
   }
+  async countTokens(account, model, contents, signal) {
+    const r = await this.call(
+      account,
+      "countTokens",
+      { request: { model: "models/" + model, contents } },
+      signal,
+    );
+    requireThat(r.ok, 502, "Провайдер не смог посчитать токены");
+    const data = await r.json();
+    requireThat(
+      Number.isSafeInteger(data.totalTokens) && data.totalTokens >= 0,
+      502,
+      "Провайдер не вернул точный счётчик токенов",
+    );
+    return { totalTokens: data.totalTokens };
+  }
 }
 export async function* events(body) {
   const reader = body.getReader();
