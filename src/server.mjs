@@ -667,6 +667,7 @@ export async function createApplication({
   server.headersTimeout = 15000;
   server.keepAliveTimeout = 5000;
   server.maxHeadersCount = 50;
+  server.maxConnections = 256;
   return server;
 }
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

@@ -114,6 +114,7 @@ function dialog(title, contents) {
   );
   root.append(d);
   d.addEventListener("close", () => d.remove());
+  d.querySelector(".dialog-close").setAttribute("aria-label", "Закрыть");
   d.showModal();
   return d;
 }
