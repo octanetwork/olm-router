@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Store, Fault, digest } from "../src/core/store.mjs";
-import { Antigravity, events } from "../src/core/provider.mjs";
+import { Antigravity, events, geminiSchema } from "../src/core/provider.mjs";
 import { createApplication } from "../src/server.mjs";
 import { fromOpenAI, priceCost } from "../src/api/gateway.mjs";
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "olm-test-"));
@@ -502,16 +502,14 @@ await test("Deadswitch and failover keep account and model boundaries", async ()
     .prepare("UPDATE accounts SET quota=? WHERE id=?")
     .run(JSON.stringify([{ id: "gemini-test", remaining: 1 }]), second.id);
   const key = store.createKey(store.user(user.id), "failover");
-  store.db
-    .prepare("UPDATE users SET settings=? WHERE id=?")
-    .run(
-      JSON.stringify({
-        mode: "stop",
-        accountId: first.id,
-        sharedFallback: false,
-      }),
-      user.id,
-    );
+  store.db.prepare("UPDATE users SET settings=? WHERE id=?").run(
+    JSON.stringify({
+      mode: "stop",
+      accountId: first.id,
+      sharedFallback: false,
+    }),
+    user.id,
+  );
   let attempts = [];
   provider.generate = async (a) => {
     attempts.push(a.id);
@@ -527,16 +525,14 @@ await test("Deadswitch and failover keep account and model boundaries", async ()
   assert.deepEqual(attempts, [first.id]);
   store.db.exec("DELETE FROM cooldowns");
   attempts = [];
-  store.db
-    .prepare("UPDATE users SET settings=? WHERE id=?")
-    .run(
-      JSON.stringify({
-        mode: "auto",
-        accountId: first.id,
-        sharedFallback: false,
-      }),
-      user.id,
-    );
+  store.db.prepare("UPDATE users SET settings=? WHERE id=?").run(
+    JSON.stringify({
+      mode: "auto",
+      accountId: first.id,
+      sharedFallback: false,
+    }),
+    user.id,
+  );
   const switched = await request("/v1/messages", {
     method: "POST",
     body: payload,
@@ -624,6 +620,49 @@ await test("native Gemini SSE and OpenAI tool chunks preserve their protocol", a
   assert.match(tool.text, /lookup/);
   assert.match(tool.text, /\[DONE\]/);
   provider.generate = async () => sse();
+});
+await test("Claude Code schemas and system turns are converted without cross-client signatures", () => {
+  const schema = geminiSchema({
+    $schema: "test",
+    type: "object",
+    properties: {
+      file_path: { type: "string" },
+      limit: { type: ["integer", "null"] },
+    },
+    required: ["file_path"],
+    additionalProperties: false,
+  });
+  assert.equal(schema.type, "OBJECT");
+  assert.equal(schema.additionalProperties, undefined);
+  assert.equal(schema.properties.limit.nullable, true);
+  assert.deepEqual(schema.required, ["file_path"]);
+  const ag = new Antigravity(store, {});
+  ag.signatures.set("account:key-one:t1", "private-signature");
+  const body = {
+    system: "Top instruction",
+    messages: [
+      { role: "user", content: "Read" },
+      { role: "system", content: [{ type: "text", text: "Client extension" }] },
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "t1",
+            name: "Read",
+            input: { file_path: "x" },
+          },
+        ],
+      },
+    ],
+    max_tokens: 128,
+  };
+  const own = ag.convert(body, "account:key-one"),
+    other = ag.convert(body, "account:key-two");
+  assert.equal(own.contents[1].parts[0].thoughtSignature, "private-signature");
+  assert.equal(other.contents[1].parts[0].thoughtSignature, undefined);
+  assert.match(own.contents[0].parts[0].text, /Client extension/);
+  assert.equal(own.systemInstruction, undefined);
 });
 test.after(async () => {
   await new Promise((r) => server.close(r));

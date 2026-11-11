@@ -204,6 +204,7 @@ export async function gateway({
   signal,
   protocol = "anthropic",
   nativeRequest,
+  scope = user.id,
 }) {
   if (protocol === "openai") body = fromOpenAI(body);
   validate(body);
@@ -252,7 +253,8 @@ export async function gateway({
         );
         reserved = true;
       }
-      const request = nativeRequest || provider.convert(body, a.id);
+      const request =
+        nativeRequest || provider.convert(body, a.id + ":" + scope);
       upstream = await provider.generate(a, body.model, request, signal);
       selected = a;
       break;
@@ -443,11 +445,16 @@ export async function gateway({
             function: { name: f.name, arguments: JSON.stringify(f.args || {}) },
           });
           if (part.thoughtSignature) {
+            requireThat(
+              part.thoughtSignature.length <= 16384,
+              502,
+              "Подпись инструмента слишком велика",
+            );
             provider.signatures.set(
-              selected.id + ":" + toolId,
+              selected.id + ":" + scope + ":" + toolId,
               part.thoughtSignature,
             );
-            if (provider.signatures.size > 10000)
+            if (provider.signatures.size > 1000)
               provider.signatures.delete(
                 provider.signatures.keys().next().value,
               );

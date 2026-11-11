@@ -693,7 +693,7 @@ async function clientsView(main) {
     desc = el("p", { class: "muted" });
   const examples = {
     "Claude Code": {
-      text: `export ANTHROPIC_BASE_URL="https://api-olm.octx.space"\nexport ANTHROPIC_AUTH_TOKEN="YOUR_OLM_KEY"\nexport ANTHROPIC_MODEL="${model}"\nclaude`,
+      text: `export ANTHROPIC_BASE_URL="https://api-olm.octx.space"\nexport ANTHROPIC_AUTH_TOKEN="YOUR_OLM_KEY"\nexport ANTHROPIC_MODEL="${model}"\nclaude --setting-sources ""`,
       note: "Anthropic Messages. Модель остаётся моделью Antigravity. OAuth Claude здесь не используется.",
     },
     OpenAI: {

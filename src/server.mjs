@@ -611,6 +611,7 @@ export async function createApplication({
               ]),
               protocol,
               nativeRequest,
+              scope: auth.id,
             });
             return;
           } finally {

@@ -353,6 +353,16 @@ export class Store {
       .prepare("SELECT * FROM accounts WHERE user_id=?")
       .all(userId)
       .find((a) => a.email === data.email);
+    requireThat(
+      old ||
+        this.db
+          .prepare(
+            "SELECT count(*) AS n FROM accounts WHERE user_id=? AND enabled=1",
+          )
+          .get(userId).n < 10,
+      400,
+      "Не больше десяти активных аккаунтов",
+    );
     const id = old?.id || secret();
     this.db
       .prepare(

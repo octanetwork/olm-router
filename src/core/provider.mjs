@@ -37,6 +37,38 @@ export class Transport {
 const ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
 const AGENT =
   "antigravity/hub/2.24.0 (aidev_client; os_type=linux; arch=x86_64)";
+export function geminiSchema(schema, depth = 0) {
+  requireThat(
+    schema && typeof schema === "object" && depth < 20,
+    400,
+    "Неподдерживаемая схема инструмента",
+  );
+  const result = {};
+  const type = Array.isArray(schema.type)
+    ? schema.type.find((t) => t !== "null")
+    : schema.type;
+  result.type = String(
+    type || (schema.properties ? "object" : "string"),
+  ).toUpperCase();
+  if (schema.description) result.description = schema.description;
+  if (
+    schema.nullable ||
+    (Array.isArray(schema.type) && schema.type.includes("null"))
+  )
+    result.nullable = true;
+  if (schema.enum?.every((v) => typeof v === "string"))
+    result.enum = schema.enum;
+  if (schema.properties)
+    result.properties = Object.fromEntries(
+      Object.entries(schema.properties).map(([key, value]) => [
+        key,
+        geminiSchema(value, depth + 1),
+      ]),
+    );
+  if (schema.items) result.items = geminiSchema(schema.items, depth + 1);
+  if (schema.required) result.required = schema.required;
+  return result;
+}
 export class Antigravity {
   constructor(store, transport = new Transport()) {
     this.store = store;
@@ -351,7 +383,9 @@ export class Antigravity {
           functionDeclarations: body.tools.map((t) => ({
             name: t.name,
             description: t.description || "",
-            parameters: t.input_schema || { type: "object", properties: {} },
+            parameters: geminiSchema(
+              t.input_schema || { type: "object", properties: {} },
+            ),
           })),
         },
       ];

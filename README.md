@@ -42,7 +42,7 @@ curl https://api-olm.octx.space/v1/messages \
   -d '{"model":"MODEL_FROM_V1_MODELS","max_tokens":1024,"stream":false,"messages":[{"role":"user","content":"Привет"}]}'
 ```
 
-Для streaming установите `stream: true`. В адаптере Anthropic/OpenAI системные инструкции, включая сообщения `role: system` из новых клиентов, кодируются в первом пользовательском turn по схеме исходного моста. Это отличается от нативного `systemInstruction` Gemini и позволяет избежать наблюдавшихся 429 на этом поле. Поддерживаются текст, входные base64-изображения, инструменты, tool results и сохранение thought signatures в пределах аккаунта и процесса. После перезапуска продолжение старого tool-цикла с подписями может потребовать нового диалога.
+Для streaming установите `stream: true`. В адаптере Anthropic/OpenAI системные инструкции, включая сообщения `role: system` из новых клиентов, кодируются в первом пользовательском turn по схеме исходного моста. Это отличается от нативного `systemInstruction` Gemini и позволяет избежать наблюдавшихся 429 на этом поле. Поддерживаются текст, входные base64-изображения, инструменты с приведением JSON Schema к подмножеству Gemini, tool results и сохранение thought signatures в пределах аккаунта, API-ключа и процесса. После перезапуска продолжение старого tool-цикла с подписями может потребовать нового диалога.
 
 ### Claude Code
 
@@ -50,7 +50,7 @@ curl https://api-olm.octx.space/v1/messages \
 export ANTHROPIC_BASE_URL='https://api-olm.octx.space'
 export ANTHROPIC_AUTH_TOKEN='YOUR_OLM_KEY'
 export ANTHROPIC_MODEL='MODEL_FROM_V1_MODELS'
-claude
+claude --setting-sources ""
 ```
 
 Если в прежнем `settings.json` уже задан другой gateway, используйте отдельный профиль или запуск с `--setting-sources ""`, чтобы его переменные не переопределяли OLM.
@@ -89,7 +89,7 @@ curl 'https://api-olm.octx.space/v1beta/models/MODEL_FROM_V1_MODELS:generateCont
 | OpenAI Chat Completions | OLM API-ключ | Проверен обычный ответ; формат SSE и tools покрыт тестами |
 | Gemini generateContent | OLM API-ключ | Проверен обычный ответ |
 | Gemini streamGenerateContent | OLM API-ключ | Реализован, требуется отдельный smoke test |
-| Claude Code 2.1.319 | Base URL и OLM API-ключ | Проверен реальный запрос с отключёнными прежними настройками; tools проверяются отдельно |
+| Claude Code 2.1.319 | Base URL и OLM API-ключ | Проверены ответ и реальный вызов Read с возвратом результата в изолированном профиле |
 | Claude Desktop | Зависит от версии приложения | Не заявлен как совместимый; вымышленных настроек конфигурации нет |
 | Gemini CLI / Antigravity IDE | Зависит от режима и версии | Google OAuth этих приложений не эмулируется |
 | OpenAI Responses | OLM API-ключ | Не реализован |
