@@ -107,7 +107,7 @@ export class Antigravity {
       );
       if (!r.ok) {
         if (r.status === 400 || r.status === 401)
-          throw new Fault(401, "Подключите Google-аккаунт заново");
+          throw new Fault(409, "Подключите Google-аккаунт заново");
         throw new Fault(502, "Не удалось обновить токен Google");
       }
       const t = await r.json();
