@@ -65,8 +65,9 @@ export async function createApplication({
   const trusted = new Set(
     (process.env.OLM_TRUSTED_PROXIES || "").split(",").filter(Boolean),
   );
+  const cookieName = secure ? "__Host-olm_session" : "olm_session";
   const cookie = (token, age = 43200) =>
-    `olm_session=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${age}${secure ? "; Secure" : ""}`;
+    `${cookieName}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${age}${secure ? "; Secure" : ""}`;
   const json = (res, status, data) => {
     res.writeHead(status, {
       "Content-Type": "application/json; charset=utf-8",
@@ -121,8 +122,8 @@ export async function createApplication({
       const rawCookie = (req.headers.cookie || "")
         .split(";")
         .map((v) => v.trim())
-        .find((v) => v.startsWith("olm_session="))
-        ?.slice(12);
+        .find((v) => v.startsWith(cookieName + "="))
+        ?.slice(cookieName.length + 1);
       const session = store.session(rawCookie);
       if (p === "/api/login" && method === "POST") {
         requireThat(

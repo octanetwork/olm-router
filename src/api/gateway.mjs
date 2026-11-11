@@ -179,13 +179,14 @@ export function candidates(store, user, model) {
         .all(user.id)
         .map((a) => ({ ...a, source: "shared" })),
     );
+  const unsettled = store.db
+    .prepare(
+      "SELECT r.id FROM reservations r JOIN usage u ON u.id=r.id WHERE u.user_id=? AND u.state='reconcile' LIMIT 1",
+    )
+    .get(user.id);
   return pool.filter(
     (a) =>
-      !store.db
-        .prepare(
-          "SELECT r.id FROM reservations r JOIN usage u ON u.id=r.id WHERE u.account_id=? AND u.state='reconcile' LIMIT 1",
-        )
-        .get(a.id) &&
+      !(a.source === "shared" && unsettled) &&
       !store.db
         .prepare(
           "SELECT 1 FROM cooldowns WHERE account_id=? AND model=? AND until>?",
