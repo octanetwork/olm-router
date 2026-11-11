@@ -188,6 +188,11 @@ await test("role and object ownership enforcement", async () => {
   );
   const m = await store.login("manager", "test-password-12345");
   const mc = "olm_session=" + m.token;
+  const ownAccounts = JSON.parse(
+    (await request("/api/accounts", { sessionCookie: c })).text,
+  ).accounts;
+  assert.equal(ownAccounts[0].email, "alice@gmail.com");
+  assert.equal(ownAccounts[0].credentials, undefined);
   assert.equal(
     (
       await request("/api/admin/users", {
