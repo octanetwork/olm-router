@@ -664,6 +664,55 @@ await test("Claude Code schemas and system turns are converted without cross-cli
   assert.match(own.contents[0].parts[0].text, /Client extension/);
   assert.equal(own.systemInstruction, undefined);
 });
+await test("OAuth callback is single-use and reconnect clears stale quotas", async () => {
+  const oldId = process.env.ANTIGRAVITY_CLIENT_ID,
+    oldSecret = process.env.ANTIGRAVITY_CLIENT_SECRET;
+  process.env.ANTIGRAVITY_CLIENT_ID = "test";
+  process.env.ANTIGRAVITY_CLIENT_SECRET = "test";
+  let exchanges = 0;
+  const ag = new Antigravity(store, {
+    fetch: async (url) => {
+      exchanges++;
+      return Response.json(
+        url.includes("/token")
+          ? { access_token: "a", refresh_token: "r", expires_in: 3600 }
+          : { email: "oauth@gmail.com", verified_email: true },
+      );
+    },
+  });
+  const flow = ag.start(user.id, "session"),
+    state = new URL(flow.url).searchParams.get("state");
+  const callback =
+    "http://localhost:51121/oauth-callback?code=c&state=" + state;
+  const account = await ag.finish(user.id, "session", callback);
+  assert.equal(account.email, "**auth@gmail.com");
+  assert.equal(account.refreshToken, undefined);
+  await assert.rejects(() => ag.finish(user.id, "session", callback), {
+    status: 400,
+  });
+  assert.equal(exchanges, 2);
+  store.db
+    .prepare("UPDATE accounts SET quota=?,checked=? WHERE id=?")
+    .run('[{"id":"stale"}]', Date.now(), account.id);
+  store.saveAccount(user.id, {
+    email: "oauth@gmail.com",
+    refreshToken: "new",
+    projectId: "project",
+  });
+  const fresh = store.db
+    .prepare("SELECT * FROM accounts WHERE id=?")
+    .get(account.id);
+  assert.equal(fresh.quota, null);
+  assert.equal(fresh.checked, null);
+  assert.deepEqual(Object.keys(store.accountCredentials(fresh)).sort(), [
+    "projectId",
+    "refreshToken",
+  ]);
+  if (oldId === undefined) delete process.env.ANTIGRAVITY_CLIENT_ID;
+  else process.env.ANTIGRAVITY_CLIENT_ID = oldId;
+  if (oldSecret === undefined) delete process.env.ANTIGRAVITY_CLIENT_SECRET;
+  else process.env.ANTIGRAVITY_CLIENT_SECRET = oldSecret;
+});
 test.after(async () => {
   await new Promise((r) => server.close(r));
   store.db.close();
