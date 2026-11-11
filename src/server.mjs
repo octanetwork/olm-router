@@ -551,6 +551,7 @@ export async function createApplication({
                 supportedGenerationMethods: [
                   "generateContent",
                   "streamGenerateContent",
+                  "countTokens",
                 ],
               })),
             });
