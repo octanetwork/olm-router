@@ -378,6 +378,12 @@ export class Store {
           projectId: data.projectId,
         }),
       );
+    const owner = this.user(userId);
+    const settings = JSON.parse(owner.settings);
+    if (!settings.accountId)
+      this.db
+        .prepare("UPDATE users SET settings=? WHERE id=?")
+        .run(JSON.stringify({ ...settings, accountId: id }), userId);
     this.audit(userId, "account.connect", id);
     return this.accountSafe(
       this.db.prepare("SELECT * FROM accounts WHERE id=?").get(id),

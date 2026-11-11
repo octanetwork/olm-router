@@ -436,6 +436,7 @@ async function connectGoogle() {
         const r = await api("/api/accounts/callback", "POST", b);
         d.close();
         notify(r.warning || "Аккаунт подключён");
+        await refreshMe();
         await navigate("accounts");
       },
       "Подключить",

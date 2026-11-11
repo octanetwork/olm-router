@@ -115,6 +115,7 @@ await test("bootstrap, sessions and encrypted storage", async () => {
   );
   assert.equal(a.email, "**lice@gmail.com");
   assert.equal(a.credentials, undefined);
+  assert.equal(JSON.parse(store.user(user.id).settings).accountId, a.id);
   store.db
     .prepare("UPDATE accounts SET quota=?,checked=? WHERE id=?")
     .run(
