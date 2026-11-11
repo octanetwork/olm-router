@@ -29,6 +29,7 @@ services:
     image: ${OLM_EGRESS_IMAGE:?pin the existing xray image digest}
     container_name: olm-egress
     restart: unless-stopped
+    user: '1000:1000'
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     read_only: true
