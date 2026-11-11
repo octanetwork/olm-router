@@ -339,7 +339,8 @@ export class Store {
     };
   }
   accountCredentials(a) {
-    return { ...a, ...this.unseal(a.credentials) };
+    const data = this.unseal(a.credentials);
+    return { refreshToken: data.refreshToken, projectId: data.projectId };
   }
   saveAccount(userId, data) {
     requireThat(
@@ -368,7 +369,15 @@ export class Store {
       .prepare(
         "INSERT INTO accounts(id,user_id,email,credentials) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET credentials=excluded.credentials, enabled=1",
       )
-      .run(id, userId, data.email, this.seal(data));
+      .run(
+        id,
+        userId,
+        data.email,
+        this.seal({
+          refreshToken: data.refreshToken,
+          projectId: data.projectId,
+        }),
+      );
     this.audit(userId, "account.connect", id);
     return this.accountSafe(
       this.db.prepare("SELECT * FROM accounts WHERE id=?").get(id),
