@@ -739,6 +739,16 @@ await test("native SDK key header and exact token count endpoint", async () => {
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { totalTokens: 7 });
   assert.equal(called, true);
+  store.db.prepare("UPDATE users SET enabled=0 WHERE id=?").run(other.id);
+  assert.throws(
+    () =>
+      store.saveAccount(other.id, {
+        email: "blocked@gmail.com",
+        refreshToken: "blocked",
+      }),
+    { status: 403 },
+  );
+  store.db.prepare("UPDATE users SET enabled=1 WHERE id=?").run(other.id);
   const models = await fetch(base + "/v1beta/models", {
     headers: { "x-goog-api-key": key.key },
   });
