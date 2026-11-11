@@ -367,7 +367,7 @@ export class Store {
     const id = old?.id || secret();
     this.db
       .prepare(
-        "INSERT INTO accounts(id,user_id,email,credentials) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET credentials=excluded.credentials, enabled=1",
+        "INSERT INTO accounts(id,user_id,email,credentials) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET credentials=excluded.credentials, enabled=1, quota=NULL, checked=NULL",
       )
       .run(
         id,
