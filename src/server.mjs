@@ -252,7 +252,7 @@ export async function createApplication({
             accounts: store.db
               .prepare("SELECT * FROM accounts WHERE user_id=?")
               .all(user.id)
-              .map((a) => store.accountSafe(a)),
+              .map((a) => ({ ...store.accountSafe(a), email: a.email })),
           });
         if (p === "/api/accounts/oauth" && method === "POST") {
           limiter.check("oauth:" + user.id, 10, 600000);
