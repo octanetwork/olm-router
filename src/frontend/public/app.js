@@ -412,18 +412,28 @@ async function connectGoogle() {
   );
   d = dialog("Подключить Antigravity", content);
   const flow = await api("/api/accounts/oauth", "POST", {});
+  const link = el(
+    "a",
+    {
+      href: flow.url,
+      ...(flow.mode === "loopback" ? { target: "_blank" } : {}),
+      rel: "noreferrer",
+    },
+    "Открыть Google",
+  );
+  if (flow.mode === "web") {
+    content.replaceChildren(
+      el("p", {}, "После входа Google вернёт вас в кабинет."),
+      link,
+    );
+    return;
+  }
   content.append(
-    el(
-      "a",
-      { href: flow.url, target: "_blank", rel: "noopener noreferrer" },
-      "Открыть Google",
-    ),
+    link,
     el(
       "p",
       { class: "note" },
-      flow.mode === "loopback"
-        ? "После входа Google откроет localhost. Скопируйте полный адрес из адресной строки, даже если страница недоступна."
-        : "Скопируйте полный адрес возврата Google.",
+      "Google вернёт вас на localhost. Скопируйте полный адрес, даже если страница не открылась.",
     ),
     form(
       [
@@ -963,6 +973,22 @@ async function pricesView(main) {
     ),
   );
 }
+const oauthResult = new URLSearchParams(location.search).get("oauth");
+if (["connected", "warning", "cancelled", "failed"].includes(oauthResult))
+  history.replaceState(null, "", location.pathname);
 refreshMe()
-  .then(shell)
+  .then(async () => {
+    await shell();
+    if (oauthResult) {
+      await navigate("accounts");
+      notify(
+        {
+          connected: "Google-аккаунт подключён",
+          warning: "Аккаунт подключён, проверка квот не завершилась",
+          cancelled: "Вход в Google отменён",
+          failed: "Не удалось подключить аккаунт Google",
+        }[oauthResult],
+      );
+    }
+  })
   .catch(() => login());
