@@ -112,7 +112,11 @@ gemini --model 'MODEL_FROM_V1_MODELS'
 
 Используется authorization code + PKCE S256, одноразовый state с TTL 10 минут, привязанный к сессии владельца. Пароль вводится только на странице Google. Refresh tokens зашифрованы AES-256-GCM, bearer-ключи и сессии хранятся в виде SHA-256-хешей. Пароли хешируются scrypt с уникальной солью.
 
-Текущий desktop OAuth-клиент использует loopback redirect. После входа нужно скопировать полный адрес возврата `http://localhost:51121/oauth-callback?...` в кабинет, даже если браузер не открыл локальную страницу. Коды не попадают в URL кабинета и access logs. Для бесшовного web callback потребуется отдельный допустимый web OAuth-клиент и проверка доступа к Antigravity; произвольная замена redirect URI не работает. См. [официальное описание desktop OAuth](https://developers.google.com/identity/protocols/oauth2/native-app).
+Для входа из production-кабинета используйте отдельный Google OAuth client типа **Web application**. Укажите в нём точный Authorized redirect URI `https://olm.octx.space/oauth/google/callback`, затем задайте `ANTIGRAVITY_WEB_CLIENT_ID` и `ANTIGRAVITY_WEB_CLIENT_SECRET` в закрытом production `.env`. После входа Google вернёт браузер в кабинет. Не добавляйте этот HTTPS адрес в desktop-клиент: тип клиента и redirect URI должны совпадать.
+
+`ANTIGRAVITY_CLIENT_ID`, `ANTIGRAVITY_CLIENT_SECRET` и `ANTIGRAVITY_REDIRECT_URI` остаются настройками desktop-клиента. Они нужны для уже связанных аккаунтов и loopback-резерва. При новом входе выбранный OAuth-клиент записывается в зашифрованные credentials аккаунта, поэтому добавление web-клиента не меняет способ обновления ранее связанных refresh tokens. Пока web-клиент не настроен, кабинет предлагает desktop loopback flow с ручным возвратом адреса.
+
+Google проверяет точное совпадение redirect URI с настройкой OAuth-клиента. Для hosted web flow это должен быть HTTPS адрес из Google Cloud Console. См. [OAuth для web-приложений](https://developers.google.com/identity/protocols/oauth2/web-server) и [OAuth для desktop-приложений](https://developers.google.com/identity/protocols/oauth2/native-app).
 
 Шифрование не скрывает данные от администратора VPS, имеющего доступ одновременно к БД и ключу шифрования. MFA пока не реализован; не считать эту версию соответствующей корпоративному профилю ASVS или ГОСТ.
 

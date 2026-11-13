@@ -66,8 +66,30 @@ export async function createApplication({
     (process.env.OLM_TRUSTED_PROXIES || "").split(",").filter(Boolean),
   );
   const cookieName = secure ? "__Host-olm_session" : "olm_session";
+  const oauthCookieName = secure ? "__Host-olm_oauth" : "olm_oauth";
   const cookie = (token, age = 43200) =>
     `${cookieName}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${age}${secure ? "; Secure" : ""}`;
+  const oauthCookie = (state, age = 600) =>
+    `${oauthCookieName}=${state}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${age}${secure ? "; Secure" : ""}`;
+  const readCookie = (req, name) =>
+    (req.headers.cookie || "")
+      .split(";")
+      .map((v) => v.trim())
+      .find((v) => v.startsWith(name + "="))
+      ?.slice(name.length + 1);
+  const oauthResult = (res, result, status = 200, clearCookie = true) => {
+    const messages = {
+      connected: "Аккаунт Google подключён. Возвращаем вас в кабинет.",
+      warning: "Аккаунт подключён. Проверка квот пока не завершилась.",
+      cancelled: "Вход отменён. Возвращаем вас в кабинет.",
+      failed: "Не удалось подключить аккаунт. Начните вход заново.",
+    };
+    if (clearCookie) res.setHeader("Set-Cookie", oauthCookie("", 0));
+    res.writeHead(status, { "Content-Type": "text/html; charset=utf-8" });
+    res.end(
+      `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="referrer" content="no-referrer"><title>OLM Router</title></head><body><p>${messages[result]}</p><a href="/?oauth=${result}">Вернуться в кабинет</a><script src="/oauth-return.js" data-result="${result}" defer></script></body></html>`,
+    );
+  };
   const json = (res, status, data) => {
     res.writeHead(status, {
       "Content-Type": "application/json; charset=utf-8",
@@ -119,11 +141,55 @@ export async function createApplication({
       }
       if (p === "/health" && method === "GET")
         return json(res, 200, { status: "ready" });
-      const rawCookie = (req.headers.cookie || "")
-        .split(";")
-        .map((v) => v.trim())
-        .find((v) => v.startsWith(cookieName + "="))
-        ?.slice(cookieName.length + 1);
+      if (p === "/oauth/google/callback" && method === "GET") {
+        limiter.check("oauth-callback:" + ip, 20, 600000);
+        const state = url.searchParams.get("state");
+        const stateCookie = readCookie(req, oauthCookieName);
+        if (!state || state !== stateCookie)
+          return oauthResult(res, "failed", 400, false);
+        if (url.searchParams.has("error")) {
+          try {
+            provider.cancelWeb(state, stateCookie);
+            return oauthResult(res, "cancelled");
+          } catch {
+            return oauthResult(res, "failed", 400);
+          }
+        }
+        try {
+          const account = await provider.finishWeb(
+            state,
+            url.searchParams.get("code"),
+            stateCookie,
+          );
+          let result = "connected";
+          try {
+            await provider.discover(
+              store.db
+                .prepare("SELECT * FROM accounts WHERE id=?")
+                .get(account.id),
+              AbortSignal.timeout(20000),
+            );
+          } catch {
+            result = "warning";
+          }
+          return oauthResult(res, result);
+        } catch (e) {
+          if (!e.status || e.status >= 500)
+            console.warn(
+              JSON.stringify({
+                event: "oauth.callback.failed",
+                requestId,
+                status: e.status || 502,
+                type: e.name,
+              }),
+            );
+          try {
+            provider.cancelWeb(state, stateCookie);
+          } catch {}
+          return oauthResult(res, "failed", 200);
+        }
+      }
+      const rawCookie = readCookie(req, cookieName);
       const session = store.session(rawCookie);
       if (p === "/api/login" && method === "POST") {
         requireThat(
@@ -257,7 +323,14 @@ export async function createApplication({
           });
         if (p === "/api/accounts/oauth" && method === "POST") {
           limiter.check("oauth:" + user.id, 10, 600000);
-          return json(res, 200, provider.start(user.id, session.hash));
+          const flow = provider.start(user.id, session.hash);
+          if (flow.mode === "web")
+            res.setHeader("Set-Cookie", oauthCookie(flow.state));
+          return json(res, 200, {
+            url: flow.url,
+            redirectUri: flow.redirectUri,
+            mode: flow.mode,
+          });
         }
         if (p === "/api/accounts/callback" && method === "POST") {
           limiter.check("oauth-finish:" + user.id, 10, 600000);
@@ -649,6 +722,7 @@ export async function createApplication({
           "/": "index.html",
           "/panel": "index.html",
           "/app.js": "app.js",
+          "/oauth-return.js": "oauth-return.js",
           "/styles.css": "styles.css",
           "/favicon.svg": "favicon.svg",
         };

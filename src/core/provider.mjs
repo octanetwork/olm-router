@@ -105,12 +105,42 @@ export class Antigravity {
     this.signatures = new Map();
     this.clientId = process.env.ANTIGRAVITY_CLIENT_ID;
     this.clientSecret = process.env.ANTIGRAVITY_CLIENT_SECRET;
-    this.redirect =
+    this.webClientId = process.env.ANTIGRAVITY_WEB_CLIENT_ID;
+    this.webClientSecret = process.env.ANTIGRAVITY_WEB_CLIENT_SECRET;
+    this.panelOrigin = process.env.OLM_PANEL_ORIGIN || "http://localhost:8045";
+    this.desktopRedirect =
       process.env.ANTIGRAVITY_REDIRECT_URI ||
       "http://localhost:51121/oauth-callback";
+    this.webRedirect = new URL(
+      "/oauth/google/callback",
+      this.panelOrigin,
+    ).toString();
   }
   configured() {
-    return !!(this.clientId && this.clientSecret);
+    return !!(
+      (this.clientId && this.clientSecret) ||
+      (this.webClientId && this.webClientSecret)
+    );
+  }
+  webConfigured() {
+    return !!(this.webClientId && this.webClientSecret);
+  }
+  oauthClient(mode = "desktop") {
+    requireThat(
+      mode === "desktop" || mode === "web",
+      500,
+      "Неизвестный тип OAuth-клиента Google",
+    );
+    const client =
+      mode === "web"
+        ? { clientId: this.webClientId, clientSecret: this.webClientSecret }
+        : { clientId: this.clientId, clientSecret: this.clientSecret };
+    requireThat(
+      client.clientId && client.clientSecret,
+      503,
+      "Не настроен OAuth-клиент Google для этого аккаунта",
+    );
+    return client;
   }
   async token(account, signal) {
     const cached = this.tokens.get(account.id);
@@ -118,6 +148,7 @@ export class Antigravity {
     if (this.refreshes.has(account.id)) return this.refreshes.get(account.id);
     const task = (async () => {
       const data = this.store.accountCredentials(account);
+      const client = this.oauthClient(data.oauthClient || "desktop");
       const r = await this.transport.fetch(
         "https://oauth2.googleapis.com/token",
         {
@@ -125,8 +156,8 @@ export class Antigravity {
           signal,
           headers: { "Content-Type": "application/x-www-form-urlencoded" },
           body: new URLSearchParams({
-            client_id: this.clientId,
-            client_secret: this.clientSecret,
+            client_id: client.clientId,
+            client_secret: client.clientSecret,
             grant_type: "refresh_token",
             refresh_token: data.refreshToken,
           }),
@@ -239,6 +270,20 @@ export class Antigravity {
   }
   start(userId, sessionHash) {
     requireThat(this.configured(), 503, "OAuth Antigravity ещё не настроен");
+    requireThat(
+      !(this.webClientId || this.webClientSecret) || this.webConfigured(),
+      503,
+      "OAuth web-клиент Google настроен не полностью",
+    );
+    const mode = this.webConfigured() ? "web" : "loopback";
+    const client = this.oauthClient(mode === "web" ? "web" : "desktop");
+    const redirect = mode === "web" ? this.webRedirect : this.desktopRedirect;
+    if (mode === "web")
+      requireThat(
+        new URL(redirect).protocol === "https:",
+        503,
+        "Для web OAuth нужен HTTPS адрес кабинета",
+      );
     const state = secret(),
       verifier = randomBytes(48).toString("base64url");
     this.store.db.prepare("DELETE FROM oauth WHERE expires<?").run(Date.now());
@@ -248,13 +293,13 @@ export class Antigravity {
         state,
         userId,
         sessionHash,
-        this.store.seal({ verifier }),
+        this.store.seal({ verifier, mode, redirectUri: redirect }),
         Date.now() + 10 * 60000,
       );
     const url = new URL("https://accounts.google.com/o/oauth2/v2/auth");
     url.search = new URLSearchParams({
-      client_id: this.clientId,
-      redirect_uri: this.redirect,
+      client_id: client.clientId,
+      redirect_uri: redirect,
       response_type: "code",
       scope:
         "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/cclog https://www.googleapis.com/auth/experimentsandconfigs",
@@ -266,8 +311,9 @@ export class Antigravity {
     }).toString();
     return {
       url: url.toString(),
-      redirectUri: this.redirect,
-      mode: this.redirect.startsWith("http://localhost:") ? "loopback" : "web",
+      redirectUri: redirect,
+      mode,
+      state,
     };
   }
   async finish(userId, sessionHash, callbackUrl) {
@@ -277,7 +323,7 @@ export class Antigravity {
     } catch {
       throw new Fault(400, "Вставьте полный адрес возврата Google");
     }
-    const redirect = new URL(this.redirect);
+    const redirect = new URL(this.desktopRedirect);
     requireThat(
       u.origin === redirect.origin && u.pathname === redirect.pathname,
       400,
@@ -293,19 +339,104 @@ export class Antigravity {
       400,
       "Запрос входа истёк или не принадлежит этой сессии",
     );
-    this.store.db.prepare("DELETE FROM oauth WHERE state=?").run(flow.state);
+    requireThat(
+      (this.store.unseal(flow.verifier).mode || "loopback") === "loopback",
+      400,
+      "Этот запрос входа должен завершиться через Google callback",
+    );
+    return this.exchange(flow, u.searchParams.get("code"), "loopback");
+  }
+  async finishWeb(state, code, cookieState) {
+    requireThat(
+      typeof state === "string" && state.length <= 128 && state === cookieState,
+      400,
+      "Запрос Google OAuth недействителен",
+    );
+    requireThat(
+      typeof code === "string" && code.length > 0 && code.length <= 4096,
+      400,
+      "Google не вернул код авторизации",
+    );
+    const flow = this.store.db
+      .prepare("SELECT * FROM oauth WHERE state=? AND expires>?")
+      .get(state, Date.now());
+    requireThat(flow, 400, "Запрос входа истёк или уже использован");
+    const session = this.store.db
+      .prepare(
+        "SELECT 1 FROM sessions WHERE hash=? AND user_id=? AND expires>?",
+      )
+      .get(flow.session_hash, flow.user_id, Date.now());
+    requireThat(
+      session && this.store.user(flow.user_id),
+      401,
+      "Сессия кабинета истекла. Войдите и начните подключение заново",
+    );
+    requireThat(
+      this.store.unseal(flow.verifier).mode === "web",
+      400,
+      "Этот запрос не использует web OAuth",
+    );
+    return this.exchange(flow, code, "web");
+  }
+  cancelWeb(state, cookieState) {
+    requireThat(
+      typeof state === "string" && state.length <= 128 && state === cookieState,
+      400,
+      "Запрос Google OAuth недействителен",
+    );
+    const flow = this.store.db
+      .prepare("SELECT * FROM oauth WHERE state=? AND expires>?")
+      .get(state, Date.now());
+    requireThat(flow, 400, "Запрос входа истёк или уже использован");
+    const session = this.store.db
+      .prepare(
+        "SELECT 1 FROM sessions WHERE hash=? AND user_id=? AND expires>?",
+      )
+      .get(flow.session_hash, flow.user_id, Date.now());
+    requireThat(
+      session && this.store.user(flow.user_id),
+      401,
+      "Сессия кабинета истекла. Войдите и начните подключение заново",
+    );
+    requireThat(
+      this.store.unseal(flow.verifier).mode === "web",
+      400,
+      "Этот запрос не использует web OAuth",
+    );
+    this.store.db.prepare("DELETE FROM oauth WHERE state=?").run(state);
+  }
+  async exchange(flow, code, mode) {
+    const details = this.store.unseal(flow.verifier);
+    const clientMode = details.mode === "web" ? "web" : "desktop";
+    requireThat(
+      clientMode === (mode === "web" ? "web" : "desktop"),
+      400,
+      "OAuth-клиент не совпадает с запросом",
+    );
+    const client = this.oauthClient(clientMode);
+    const redirect =
+      details.redirectUri ||
+      (clientMode === "web" ? this.webRedirect : this.desktopRedirect);
+    const consumed = this.store.db
+      .prepare("DELETE FROM oauth WHERE state=? AND expires>?")
+      .run(flow.state, Date.now());
+    requireThat(
+      consumed.changes === 1,
+      400,
+      "Запрос входа истёк или уже использован",
+    );
     const r = await this.transport.fetch(
       "https://oauth2.googleapis.com/token",
       {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({
-          client_id: this.clientId,
-          client_secret: this.clientSecret,
+          client_id: client.clientId,
+          client_secret: client.clientSecret,
           grant_type: "authorization_code",
-          code: u.searchParams.get("code"),
-          redirect_uri: this.redirect,
-          code_verifier: this.store.unseal(flow.verifier).verifier,
+          code,
+          redirect_uri: redirect,
+          code_verifier: details.verifier,
         }),
       },
     );
@@ -327,9 +458,10 @@ export class Antigravity {
       403,
       "Требуется подтверждённая Google-почта",
     );
-    const a = this.store.saveAccount(userId, {
+    const a = this.store.saveAccount(flow.user_id, {
       email: p.email,
       refreshToken: token.refresh_token,
+      oauthClient: clientMode,
     });
     this.tokens.set(a.id, {
       token: token.access_token,
