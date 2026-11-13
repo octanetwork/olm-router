@@ -213,6 +213,134 @@ await test("closed routes, csrf and cookie security", async () => {
     await new Promise((r) => secured.close(r));
   }
 });
+await test("web OAuth callback keeps strict session and account client binding", async () => {
+  const env = Object.fromEntries(
+    [
+      "ANTIGRAVITY_CLIENT_ID",
+      "ANTIGRAVITY_CLIENT_SECRET",
+      "ANTIGRAVITY_WEB_CLIENT_ID",
+      "ANTIGRAVITY_WEB_CLIENT_SECRET",
+      "OLM_PANEL_ORIGIN",
+    ].map((name) => [name, process.env[name]]),
+  );
+  process.env.ANTIGRAVITY_CLIENT_ID = "desktop-client";
+  process.env.ANTIGRAVITY_CLIENT_SECRET = "desktop-secret";
+  process.env.ANTIGRAVITY_WEB_CLIENT_ID = "web-client";
+  process.env.ANTIGRAVITY_WEB_CLIENT_SECRET = "web-secret";
+  process.env.OLM_PANEL_ORIGIN = "https://olm.octx.space";
+  const oauthSession = await store.login("alice", "test-password-12345");
+  let webAccountId;
+  const exchanges = [];
+  const webProvider = new Antigravity(store, {
+    fetch: async (url, options = {}) => {
+      if (url.endsWith("/token")) {
+        const form = new URLSearchParams(options.body);
+        exchanges.push(form);
+        return Response.json({
+          access_token: "access-" + exchanges.length,
+          ...(form.get("grant_type") === "authorization_code"
+            ? { refresh_token: "web-refresh" }
+            : {}),
+          expires_in: 3600,
+        });
+      }
+      if (url.endsWith("/userinfo"))
+        return Response.json({
+          email: "web-login@gmail.com",
+          verified_email: true,
+        });
+      if (url.includes(":loadCodeAssist"))
+        return Response.json({ cloudaicompanionProject: "web-project" });
+      if (url.includes(":fetchAvailableModels"))
+        return Response.json({
+          models: { "gemini-test": { displayName: "Gemini Test" } },
+        });
+      throw new Error("Unexpected OAuth test request");
+    },
+  });
+  const securePanel = await createApplication({
+    store,
+    provider: webProvider,
+    secure: true,
+    panelOrigin: "https://olm.octx.space",
+  });
+  await new Promise((resolve) => securePanel.listen(0, "127.0.0.1", resolve));
+  const address = "http://127.0.0.1:" + securePanel.address().port;
+  try {
+    const started = await fetch(address + "/api/accounts/oauth", {
+      method: "POST",
+      headers: {
+        cookie: "__Host-olm_session=" + oauthSession.token,
+        origin: "https://olm.octx.space",
+        "x-csrf-token": oauthSession.csrf,
+        "Content-Type": "application/json",
+      },
+      body: "{}",
+    });
+    assert.equal(started.status, 200);
+    const transactionCookie = started.headers.get("set-cookie");
+    assert.match(transactionCookie, /^__Host-olm_oauth=/);
+    assert.match(transactionCookie, /; Secure/);
+    assert.match(transactionCookie, /; HttpOnly/);
+    assert.match(transactionCookie, /; SameSite=Lax/);
+    const flow = await started.json();
+    assert.equal(flow.mode, "web");
+    assert.equal(flow.redirectUri, "https://olm.octx.space/oauth/google/callback");
+    const authUrl = new URL(flow.url);
+    assert.equal(authUrl.searchParams.get("client_id"), "web-client");
+    assert.equal(authUrl.searchParams.get("redirect_uri"), flow.redirectUri);
+    const state = authUrl.searchParams.get("state");
+    const cookieState = transactionCookie.split(";")[0];
+    const callbackUrl =
+      address + "/oauth/google/callback?code=one-time-code&state=" + state;
+    const missingCookie = await fetch(callbackUrl);
+    assert.equal(missingCookie.status, 400);
+    await missingCookie.arrayBuffer();
+    const callback = await fetch(callbackUrl, {
+      headers: { cookie: cookieState },
+    });
+    assert.equal(callback.status, 200);
+    assert.match(callback.headers.get("set-cookie"), /Max-Age=0/);
+    const page = await callback.text();
+    assert.match(page, /oauth-return\.js/);
+    assert.ok(!page.includes("one-time-code"));
+    assert.equal(exchanges[0].get("client_id"), "web-client");
+    assert.equal(
+      exchanges[0].get("redirect_uri"),
+      "https://olm.octx.space/oauth/google/callback",
+    );
+    const replay = await fetch(callbackUrl, {
+      headers: { cookie: cookieState },
+    });
+    assert.equal(replay.status, 200);
+    await replay.arrayBuffer();
+    assert.equal(exchanges.length, 1);
+    const connected = store.db
+      .prepare("SELECT * FROM accounts WHERE user_id=? AND email=?")
+      .get(user.id, "web-login@gmail.com");
+    webAccountId = connected.id;
+    assert.equal(store.accountCredentials(connected).oauthClient, "web");
+    webProvider.tokens.delete(connected.id);
+    await webProvider.token(connected);
+    assert.equal(exchanges[1].get("client_id"), "web-client");
+    const legacy = store.db
+      .prepare("SELECT * FROM accounts WHERE user_id=? AND email=?")
+      .get(user.id, "alice@gmail.com");
+    await webProvider.token(legacy);
+    assert.equal(exchanges[2].get("client_id"), "desktop-client");
+  } finally {
+    if (webAccountId)
+      store.db.prepare("DELETE FROM accounts WHERE id=?").run(webAccountId);
+    store.db
+      .prepare("DELETE FROM sessions WHERE hash=?")
+      .run(digest(oauthSession.token));
+    await new Promise((resolve) => securePanel.close(resolve));
+    for (const [name, value] of Object.entries(env)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+});
 await test("role and object ownership enforcement", async () => {
   const normal = await store.login("alice", "test-password-12345");
   const c = "olm_session=" + normal.token;
@@ -752,6 +880,7 @@ await test("OAuth callback is single-use and reconnect clears stale quotas", asy
   assert.equal(fresh.quota, null);
   assert.equal(fresh.checked, null);
   assert.deepEqual(Object.keys(store.accountCredentials(fresh)).sort(), [
+    "oauthClient",
     "projectId",
     "refreshToken",
   ]);

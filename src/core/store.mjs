@@ -340,7 +340,11 @@ export class Store {
   }
   accountCredentials(a) {
     const data = this.unseal(a.credentials);
-    return { refreshToken: data.refreshToken, projectId: data.projectId };
+    return {
+      refreshToken: data.refreshToken,
+      projectId: data.projectId,
+      oauthClient: data.oauthClient || "desktop",
+    };
   }
   saveAccount(userId, data) {
     const owner = this.user(userId);
@@ -378,6 +382,7 @@ export class Store {
         this.seal({
           refreshToken: data.refreshToken,
           projectId: data.projectId,
+          oauthClient: data.oauthClient || "desktop",
         }),
       );
     const settings = JSON.parse(owner.settings);
