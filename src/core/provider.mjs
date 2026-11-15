@@ -608,11 +608,21 @@ export class Antigravity {
     }
     return r;
   }
-  async countTokens(account, model, contents, signal) {
+  async countTokens(account, model, request, signal) {
+    const { contents, systemInstruction, tools } = Array.isArray(request)
+      ? { contents: request }
+      : request;
     const r = await this.call(
       account,
       "countTokens",
-      { request: { model: "models/" + model, contents } },
+      {
+        request: {
+          model: "models/" + model,
+          contents,
+          ...(systemInstruction ? { systemInstruction } : {}),
+          ...(tools ? { tools } : {}),
+        },
+      },
       signal,
     );
     requireThat(r.ok, 502, "Провайдер не смог посчитать токены");

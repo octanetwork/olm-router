@@ -143,59 +143,6 @@ export function validate(body) {
     "stream должен быть boolean",
   );
 }
-export const priceCost = (p, input, output) => {
-  const total = Number(
-    (BigInt(input) * BigInt(p.input) +
-      BigInt(output) * BigInt(p.output) +
-      999999n) /
-      1000000n,
-  );
-  requireThat(
-    Number.isSafeInteger(total) && total >= 0,
-    400,
-    "Расход слишком велик",
-  );
-  return total;
-};
-export function candidates(store, user, model) {
-  const settings = JSON.parse(user.settings);
-  let own = store.db
-    .prepare("SELECT * FROM accounts WHERE user_id=? AND enabled=1 ORDER BY id")
-    .all(user.id);
-  if (settings.accountId)
-    own.sort(
-      (a, b) =>
-        Number(b.id === settings.accountId) -
-        Number(a.id === settings.accountId),
-    );
-  if (settings.mode === "stop") own = own.slice(0, 1);
-  let pool = own.map((a) => ({ ...a, source: "own" }));
-  if (own.length === 0 || settings.sharedFallback === true)
-    pool.push(
-      ...store.db
-        .prepare(
-          "SELECT * FROM accounts WHERE shared=1 AND enabled=1 AND user_id!=? ORDER BY id",
-        )
-        .all(user.id)
-        .map((a) => ({ ...a, source: "shared" })),
-    );
-  const unsettled = store.db
-    .prepare(
-      "SELECT r.id FROM reservations r JOIN usage u ON u.id=r.id WHERE u.user_id=? AND u.state='reconcile' LIMIT 1",
-    )
-    .get(user.id);
-  return pool.filter(
-    (a) =>
-      !(a.source === "shared" && unsettled) &&
-      !store.db
-        .prepare(
-          "SELECT 1 FROM cooldowns WHERE account_id=? AND model=? AND until>?",
-        )
-        .get(a.id, model, Date.now()) &&
-      a.quota &&
-      JSON.parse(a.quota).some((m) => m.id === model && m.remaining !== 0),
-  );
-}
 export async function gateway({
   store,
   provider,
@@ -206,72 +153,142 @@ export async function gateway({
   protocol = "anthropic",
   nativeRequest,
   scope = user.id,
+  assignedAccount = null,
+  apiKey = null,
 }) {
   if (protocol === "openai") body = fromOpenAI(body);
   validate(body);
+  requireThat(assignedAccount && apiKey, 403, "Запрос не привязан к API-ключу");
+  const quota = JSON.parse(assignedAccount.quota || "[]").find(
+    (item) => item.id === body.model,
+  );
+  requireThat(quota, 409, "Модель больше не доступна в этом Google-аккаунте");
+  requireThat(
+    quota.remaining === null ||
+      quota.remaining === undefined ||
+      Number(quota.remaining) > 0,
+    429,
+    "Квота этой модели в назначенном Google-аккаунте исчерпана",
+  );
+  const cooldown = store.db
+    .prepare(
+      "SELECT until FROM cooldowns WHERE account_id=? AND model=? AND until>?",
+    )
+    .get(assignedAccount.id, body.model, Date.now());
+  requireThat(!cooldown, 429, "Модель временно ограничена Google");
+  const assignment = store.db
+    .prepare(
+      "SELECT account_id FROM api_key_models WHERE api_key_id=? AND model=?",
+    )
+    .get(apiKey.id, body.model);
+  requireThat(
+    assignment?.account_id === assignedAccount.id &&
+      assignedAccount.user_id === user.id &&
+      assignedAccount.enabled,
+    403,
+    "Модель и Google-аккаунт не назначены этому API-ключу",
+  );
   const id = randomUUID(),
     created = Date.now(),
-    accounts = candidates(store, user, body.model);
-  requireThat(
-    accounts.length,
-    409,
-    "Нет доступного аккаунта с этой моделью. Проверьте квоту и режим переключения",
-  );
-  let upstream,
+    accounts = [{ ...assignedAccount, source: "own" }];
+  let input = null,
+    output = null,
+    upstream,
     selected,
-    price,
-    reserved = false;
-  const prices = store.db
-    .prepare("SELECT value FROM prices WHERE model=?")
-    .get(body.model);
-  const inputBound =
-    Buffer.byteLength(JSON.stringify(nativeRequest || body), "utf8") + 4096;
+    keyReserved = false,
+    keyReservation = 0;
   for (const a of accounts) {
+    let providerCall = false;
     try {
-      store.db
-        .prepare(
-          "INSERT INTO usage VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET account_id=excluded.account_id,source=excluded.source,state='pending'",
-        )
-        .run(
-          id,
-          user.id,
-          a.id,
-          body.model,
-          a.source,
-          null,
-          null,
-          0,
-          "pending",
-          created,
-        );
-      if (a.source === "shared") {
-        requireThat(prices, 409, "Для модели общего пула ещё не задана цена");
-        price = JSON.parse(prices.value);
-        store.reserve(
-          user.id,
-          priceCost(price, inputBound, body.max_tokens),
-          id,
-        );
-        reserved = true;
-      }
+      store.transaction(() => {
+        store.db
+          .prepare(
+            "INSERT INTO usage VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET account_id=excluded.account_id,source=excluded.source,state='pending'",
+          )
+          .run(
+            id,
+            user.id,
+            a.id,
+            body.model,
+            a.source,
+            null,
+            null,
+            0,
+            "pending",
+            created,
+          );
+        store.db
+          .prepare(
+            "INSERT INTO usage_details(usage_id,api_key_id,tokens) VALUES(?,?,0) ON CONFLICT(usage_id) DO UPDATE SET api_key_id=excluded.api_key_id",
+          )
+          .run(id, apiKey.id);
+      });
       const request =
         nativeRequest || provider.convert(body, a.id + ":" + scope);
+      if (apiKey?.token_limit !== null && apiKey?.token_limit !== undefined) {
+        providerCall = true;
+        const count = await provider.countTokens(
+          a,
+          body.model,
+          request,
+          signal,
+        );
+        providerCall = false;
+        input = count.totalTokens;
+        const activeReservations = store.db
+          .prepare(
+            "SELECT coalesce(sum(amount),0) AS n FROM token_reservations WHERE api_key_id=?",
+          )
+          .get(apiKey.id).n;
+        const keyState = store.db
+          .prepare(
+            "SELECT token_limit,tokens_used FROM api_key_policies WHERE api_key_id=?",
+          )
+          .get(apiKey.id);
+        requireThat(keyState, 401, "API-ключ отозван");
+        const available =
+          keyState.token_limit - keyState.tokens_used - activeReservations;
+        requireThat(
+          available > input,
+          429,
+          "Лимита API-ключа не хватает даже на входные токены запроса",
+        );
+        body.max_tokens = Math.min(body.max_tokens, available - input);
+        request.generationConfig ||= {};
+        request.generationConfig.maxOutputTokens = body.max_tokens;
+        keyReservation = input + body.max_tokens;
+        store.reserveKeyTokens(apiKey, keyReservation, id);
+        keyReserved = true;
+        store.db
+          .prepare("UPDATE usage SET input=? WHERE id=?")
+          .run(input, id);
+      }
+      providerCall = true;
       upstream = await provider.generate(a, body.model, request, signal);
+      providerCall = false;
       selected = a;
       break;
     } catch (e) {
       if (e.dispatched && !e.rejected) {
+        if (keyReserved) {
+          store.settleKeyTokens(id, keyReservation, {
+            input,
+            output: null,
+            state: "usage_unknown",
+          });
+          keyReserved = false;
+        }
         store.db
           .prepare("UPDATE usage SET state=? WHERE id=?")
-          .run(reserved ? "reconcile" : "failed", id);
+          .run("usage_unknown", id);
         throw e;
       }
       store.db.prepare("UPDATE usage SET state='failed' WHERE id=?").run(id);
-      if (reserved) {
-        store.settle(id, 0);
-        reserved = false;
+      if (keyReserved) {
+        store.releaseKeyTokens(id);
+        keyReserved = false;
       }
-      if (e.status === 429) {
+      if (providerCall && e.status === 429) {
         store.db
           .prepare(
             "INSERT INTO cooldowns VALUES(?,?,?) ON CONFLICT(account_id,model) DO UPDATE SET until=excluded.until",
@@ -285,8 +302,6 @@ export async function gateway({
   const content = [],
     toolCalls = [];
   let text = "",
-    input = null,
-    output = null,
     nativeUsage = null,
     finishReason = "STOP",
     nativeParts = [],
@@ -507,25 +522,15 @@ export async function gateway({
     }
     requireThat(hasContent, 502, "Провайдер вернул пустой ответ");
     const actual = input !== null && output !== null;
-    let cost = 0;
-    if (reserved && actual) {
-      cost = priceCost(price, input, output);
-      const reservation = store.db
-        .prepare("SELECT amount FROM reservations WHERE id=?")
-        .get(id);
-      if (reservation && cost <= reservation.amount) {
-        store.settle(id, cost, { input, output, state: "complete" });
-        reserved = false;
-      } else cost = 0;
+    const state = actual ? "complete" : "usage_unknown";
+    if (apiKey) {
+      const charged = actual ? input + output : keyReserved ? keyReservation : 0;
+      store.settleKeyTokens(id, charged, { input, output, state });
+      keyReserved = false;
     }
-    const state = reserved
-      ? "reconcile"
-      : actual
-        ? "complete"
-        : "usage_unknown";
     store.db
-      .prepare("UPDATE usage SET input=?,output=?,credits=?,state=? WHERE id=?")
-      .run(input, output, cost, state, id);
+      .prepare("UPDATE usage SET input=?,output=?,state=? WHERE id=?")
+      .run(input, output, state, id);
     const usage = { input_tokens: input, output_tokens: output };
     if (stream) {
       await closeBlock();
@@ -633,9 +638,22 @@ export async function gateway({
     res.end();
     ended = true;
   } catch (e) {
+    if (keyReserved) {
+      store.settleKeyTokens(id, keyReservation, {
+        input,
+        output: null,
+        state: "usage_unknown",
+      });
+      keyReserved = false;
+    }
     store.db
       .prepare("UPDATE usage SET input=?,output=?,state=? WHERE id=?")
-      .run(input, output, reserved ? "reconcile" : "failed", id);
+      .run(
+        input,
+        output,
+        "usage_unknown",
+        id,
+      );
     if (res.headersSent && !res.destroyed) {
       if (protocol === "anthropic")
         await write(

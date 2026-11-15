@@ -3,10 +3,11 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { Store, Fault, digest } from "../src/core/store.mjs";
 import { Antigravity, events, geminiSchema } from "../src/core/provider.mjs";
 import { createApplication } from "../src/server.mjs";
-import { fromOpenAI, priceCost } from "../src/api/gateway.mjs";
+import { fromOpenAI } from "../src/api/gateway.mjs";
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "olm-test-"));
 const store = new Store(dir, "aa".repeat(32));
 let server, base, admin, user, other, manager, session, cookie, csrf;
@@ -36,10 +37,42 @@ const provider = {
   tokens: new Map(),
   signatures: new Map(),
   convert: (b) => b,
+  countTokens: async () => ({ totalTokens: 10 }),
   generate: async () => sse(),
   discover: async () => [],
   start: () => ({ url: "https://accounts.google.com" }),
 };
+function ensureAccount(target, model = "gemini-test") {
+  let account = store.db
+    .prepare("SELECT * FROM accounts WHERE user_id=? AND enabled=1 ORDER BY id")
+    .all(target.id)[0];
+  if (!account)
+    account = store.db.prepare("SELECT * FROM accounts WHERE id=?").get(
+      store.saveAccount(target.id, {
+        email: `${target.login}@gmail.com`,
+        refreshToken: "test-refresh-token",
+        projectId: "project",
+      }).id,
+    );
+  const models = JSON.parse(account.quota || "[]");
+  if (!models.some((item) => item.id === model))
+    models.push({ id: model, remaining: 1 });
+  store.db
+    .prepare("UPDATE accounts SET quota=? WHERE id=?")
+    .run(JSON.stringify(models), account.id);
+  return store.db.prepare("SELECT * FROM accounts WHERE id=?").get(account.id);
+}
+function issueKey(target, name, { account, model = "gemini-test", tokenLimit = null, assignments } = {}) {
+  const owner = store.user(target.id);
+  const selected = assignments || [
+    { model, accountId: (account || ensureAccount(owner, model)).id },
+  ];
+  return store.createKey(owner, {
+    name,
+    assignments: selected,
+    tokenLimit,
+  });
+}
 async function request(
   p,
   {
@@ -131,6 +164,130 @@ await test("bootstrap, sessions and encrypted storage", async () => {
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   base = "http://127.0.0.1:" + server.address().port;
+});
+await test("legacy key routing migrates once and does not grant later accounts", () => {
+  const legacyDir = fs.mkdtempSync(path.join(os.tmpdir(), "olm-legacy-"));
+  const file = path.join(legacyDir, "olm.sqlite");
+  const db = new DatabaseSync(file);
+  db.exec(`
+    CREATE TABLE users(id TEXT PRIMARY KEY,login TEXT UNIQUE,password TEXT,role TEXT,manager TEXT,enabled INTEGER,balance INTEGER,settings TEXT);
+    CREATE TABLE api_keys(id TEXT PRIMARY KEY,hash TEXT UNIQUE,user_id TEXT,name TEXT,prefix TEXT,created INTEGER);
+    CREATE TABLE accounts(id TEXT PRIMARY KEY,user_id TEXT,email TEXT,credentials TEXT,shared INTEGER,enabled INTEGER,quota TEXT,checked INTEGER,cooldown INTEGER);
+  `);
+  db.prepare("INSERT INTO users VALUES(?,?,?,?,?,?,?,?)").run(
+    "legacy-owner",
+    "legacy",
+    "unused",
+    "user",
+    null,
+    1,
+    0,
+    JSON.stringify({ accountId: "legacy-account" }),
+  );
+  db.prepare("INSERT INTO users VALUES(?,?,?,?,?,?,?,?)").run(
+    "late-owner",
+    "late",
+    "unused",
+    "user",
+    null,
+    1,
+    0,
+    JSON.stringify({}),
+  );
+  db.prepare("INSERT INTO api_keys VALUES(?,?,?,?,?,?)").run(
+    "legacy-key",
+    digest("legacy-token"),
+    "legacy-owner",
+    "legacy",
+    "legacy-prefix",
+    Date.now(),
+  );
+  db.prepare("INSERT INTO api_keys VALUES(?,?,?,?,?,?)").run(
+    "late-key",
+    digest("late-token"),
+    "late-owner",
+    "late",
+    "late-prefix",
+    Date.now(),
+  );
+  db.prepare("INSERT INTO accounts VALUES(?,?,?,?,?,?,?,?,?)").run(
+    "legacy-account",
+    "legacy-owner",
+    "legacy@gmail.com",
+    "{}",
+    0,
+    1,
+    JSON.stringify([{ id: "gemini-test", remaining: 1 }]),
+    Date.now(),
+    0,
+  );
+  db.close();
+  let migrated;
+  try {
+    migrated = new Store(legacyDir, "bb".repeat(32));
+    assert.deepEqual(
+      migrated.keyModels("legacy-key").map((item) => [item.model, item.accountId]),
+      [["gemini-test", "legacy-account"]],
+    );
+    assert.deepEqual(migrated.keyModels("late-key"), []);
+    const laterAccount = migrated.saveAccount("late-owner", {
+      email: "late@gmail.com",
+      refreshToken: "late-refresh",
+      projectId: "project",
+    });
+    migrated.db
+      .prepare("UPDATE accounts SET quota=? WHERE id=?")
+      .run(JSON.stringify([{ id: "gemini-test", remaining: 1 }]), laterAccount.id);
+    migrated.db.close();
+    migrated = new Store(legacyDir, "bb".repeat(32));
+    assert.deepEqual(migrated.keyModels("late-key"), []);
+    assert.deepEqual(
+      migrated.db
+        .prepare("PRAGMA table_info(api_keys)")
+        .all()
+        .map((column) => column.name),
+      ["id", "hash", "user_id", "name", "prefix", "created"],
+    );
+    migrated.db
+      .prepare("INSERT INTO api_keys VALUES(?,?,?,?,?,?)")
+      .run(
+        "rollback-key",
+        digest("rollback-token"),
+        "legacy-owner",
+        "from previous version",
+        "rollback-prefix",
+        Date.now(),
+      );
+    migrated.db
+      .prepare("INSERT INTO usage VALUES(?,?,?,?,?,?,?,?,?,?)")
+      .run(
+        "rollback-usage",
+        "legacy-owner",
+        "legacy-account",
+        "gemini-test",
+        "own",
+        2,
+        3,
+        0,
+        "complete",
+        Date.now(),
+      );
+    migrated.db.close();
+    migrated = new Store(legacyDir, "bb".repeat(32));
+    assert.deepEqual(
+      migrated.keyModels("rollback-key").map((item) => [item.model, item.accountId]),
+      [["gemini-test", "legacy-account"]],
+    );
+    assert.equal(
+      migrated.db
+        .prepare("SELECT tokens FROM usage_details WHERE usage_id=?")
+        .get("rollback-usage").tokens,
+      5,
+    );
+  } finally {
+    migrated?.db.close();
+    fs.rmSync(legacyDir, { recursive: true, force: true });
+  }
 });
 await test("closed routes, csrf and cookie security", async () => {
   assert.equal(
@@ -372,11 +529,11 @@ await test("role and object ownership enforcement", async () => {
   );
   assert.equal(
     (
-      await request("/api/admin/users/" + user.id + "/credits", {
+      await request(`/api/admin/users/${user.id}/keys`, {
         method: "POST",
         sessionCookie: mc,
         csrfToken: m.csrf,
-        body: { amount: 100, reason: "test" },
+        body: { name: "blocked", tokenLimit: 100, assignments: [] },
       })
     ).status,
     403,
@@ -404,11 +561,11 @@ await test("role and object ownership enforcement", async () => {
         body: { shared: true },
       })
     ).status,
-    403,
+    404,
   );
 });
-await test("api keys stored hashed and revocable, private usage free", async () => {
-  const k = store.createKey(store.user(user.id), "test");
+await test("api keys are account-bound, usage is token-based and revocable", async () => {
+  const k = issueKey(user, "test");
   assert.equal(store.apiKey(k.key).user.id, user.id);
   assert.ok(
     !JSON.stringify(store.db.prepare("SELECT * FROM api_keys").all()).includes(
@@ -426,9 +583,13 @@ await test("api keys stored hashed and revocable, private usage free", async () 
   assert.deepEqual(b.usage, { input_tokens: 10, output_tokens: 4 });
   assert.equal(store.user(user.id).balance, 0);
   const u = store.db
-    .prepare("SELECT * FROM usage WHERE user_id=?")
+    .prepare(
+      "SELECT u.*,d.tokens,d.api_key_id FROM usage u JOIN usage_details d ON d.usage_id=u.id WHERE u.user_id=?",
+    )
     .get(user.id);
   assert.equal(u.credits, 0);
+  assert.equal(u.tokens, 14);
+  assert.equal(u.api_key_id, k.id);
   assert.equal(u.source, "own");
   assert.equal(u.state, "complete");
   const o = await request("/v1/chat/completions", {
@@ -462,110 +623,150 @@ await test("api keys stored hashed and revocable, private usage free", async () 
   store.db.prepare("DELETE FROM api_keys WHERE id=?").run(k.id);
   assert.equal((await request("/v1/models", { key: k.key })).status, 401);
 });
-await test("atomic credits, reservation and exactly-once settlement", async () => {
-  store.transfer(admin, user.id, 1000, "allocation");
-  assert.equal(store.user(user.id).balance, 1000);
-  assert.throws(() => store.reserve(user.id, 1001, "too-much"), {
-    status: 402,
+await test("per-key token limits reserve concurrent use and charge actual tokens", async () => {
+  store.db.exec("DELETE FROM cooldowns");
+  const key = issueKey(user, "twenty-token-cap", { tokenLimit: 20 });
+  let generated = 0;
+  provider.generate = async () => {
+    generated++;
+    return sse();
+  };
+  const first = await request("/v1/messages", {
+    method: "POST",
+    body: payload,
+    key: key.key,
   });
-  store.reserve(user.id, 800, "reserve");
-  assert.throws(() => store.reserve(user.id, 800, "other"), { status: 402 });
-  store.settle("reserve", 20);
-  assert.equal(store.user(user.id).balance, 980);
-  store.settle("reserve", 20);
-  assert.equal(store.user(user.id).balance, 980);
-  const managed = await store.createUser(store.user(manager.id), {
-    login: "managed",
-    password: "test-password-12345",
-  });
-  assert.throws(
-    () => store.transfer(store.user(manager.id), managed.id, 1, "allocation"),
-    { status: 402 },
+  assert.equal(first.status, 200, first.text);
+  assert.equal(
+    store.db
+      .prepare("SELECT tokens_used FROM api_key_policies WHERE api_key_id=?")
+      .get(key.id)
+      .tokens_used,
+    14,
   );
-  store.transfer(admin, manager.id, 100, "budget");
-  store.transfer(store.user(manager.id), managed.id, 10, "allocation");
-  assert.equal(store.user(manager.id).balance, 90);
-  assert.equal(store.user(managed.id).balance, 10);
-  assert.equal(priceCost({ input: 1000000, output: 2000000 }, 10, 4), 18);
+  assert.equal(
+    store.db.prepare("SELECT count(*) AS n FROM token_reservations").get().n,
+    0,
+  );
+  const over = await request("/v1/messages", {
+    method: "POST",
+    body: payload,
+    key: key.key,
+  });
+  assert.equal(over.status, 429, over.text);
+  assert.equal(generated, 1);
+  assert.equal(
+    store.db.prepare("SELECT count(*) AS n FROM cooldowns").get().n,
+    0,
+  );
+  provider.generate = async () => sse();
 });
-await test("shared billing requires price and balance, tracks exact usage", async () => {
-  const pool = store.saveAccount(admin.id, {
-    email: "pool@gmail.com",
-    refreshToken: "pool-secret",
+await test("each API key only exposes its selected model and account", async () => {
+  store.db.exec("DELETE FROM cooldowns");
+  const first = ensureAccount(store.user(user.id));
+  const second = store.saveAccount(user.id, {
+    email: "backup@gmail.com",
+    refreshToken: "backup-secret",
     projectId: "project",
   });
   store.db
-    .prepare("UPDATE accounts SET shared=1,quota=? WHERE id=?")
-    .run(JSON.stringify([{ id: "gemini-test", remaining: 1 }]), pool.id);
-  const key = store.createKey(store.user(other.id), "shared");
-  assert.equal(
-    (
-      await request("/v1/messages", {
-        method: "POST",
-        body: payload,
-        key: key.key,
-      })
-    ).status,
-    409,
+    .prepare("UPDATE accounts SET quota=? WHERE id=?")
+    .run(JSON.stringify([{ id: "gemini-test", remaining: 1 }]), second.id);
+  const limited = issueKey(user, "pinned", {
+    account: first,
+    assignments: [{ model: "gemini-test", accountId: first.id }],
+  });
+  const models = await request("/v1/models", { key: limited.key });
+  assert.deepEqual(
+    JSON.parse(models.text).data.map((item) => item.id),
+    ["gemini-test"],
   );
-  store.db
-    .prepare("INSERT INTO prices VALUES(?,?)")
-    .run("gemini-test", JSON.stringify({ input: 1000000, output: 2000000 }));
-  assert.equal(
-    (
-      await request("/v1/messages", {
-        method: "POST",
-        body: payload,
-        key: key.key,
-      })
-    ).status,
-    402,
-  );
-  store.transfer(admin, other.id, 1000000, "allocation");
-  const r = await request("/v1/messages", {
+  const denied = await request("/v1/messages", {
+    method: "POST",
+    body: { ...payload, model: "not-assigned" },
+    key: limited.key,
+  });
+  assert.equal(denied.status, 403);
+  let attempted = [];
+  provider.generate = async (account) => {
+    attempted.push(account.id);
+    throw new Fault(429, "quota");
+  };
+  const stopped = await request("/v1/messages", {
     method: "POST",
     body: payload,
-    key: key.key,
+    key: limited.key,
   });
-  assert.equal(r.status, 200, r.text);
-  assert.equal(store.user(other.id).balance, 999982);
-  assert.equal(
-    store.db.prepare("SELECT count(*) AS n FROM reservations").get().n,
-    0,
-  );
-  provider.generate = async () => sse([{ text: "unknown usage" }], null);
-  const unknown = await request("/v1/messages", {
-    method: "POST",
-    body: payload,
-    key: key.key,
-  });
-  assert.equal(unknown.status, 200, unknown.text);
-  assert.equal(JSON.parse(unknown.text).usage.input_tokens, null);
-  assert.equal(
-    store.db.prepare("SELECT count(*) AS n FROM reservations").get().n,
-    1,
-  );
-  assert.equal(
-    (
-      await request("/v1/messages", {
-        method: "POST",
-        body: payload,
-        key: key.key,
-      })
-    ).status,
-    409,
-  );
+  assert.equal(stopped.status, 429);
+  assert.deepEqual(attempted, [first.id]);
   provider.generate = async () => sse();
-  store.transfer(admin, manager.id, 100000, "isolated pool check");
-  const peerKey = store.createKey(store.user(manager.id), "peer");
-  const peer = await request("/v1/messages", {
+});
+await test("administrator issues model and account scoped keys", async () => {
+  const account = ensureAccount(store.user(user.id));
+  const issued = await request(`/api/admin/users/${user.id}/keys`, {
     method: "POST",
-    body: payload,
-    key: peerKey.key,
+    body: {
+      name: "issued",
+      tokenLimit: 500,
+      assignments: [{ model: "gemini-test", accountId: account.id }],
+    },
   });
-  assert.equal(peer.status, 200, peer.text);
-  const pending = store.db.prepare("SELECT * FROM reservations").get();
-  store.settle(pending.id, 0);
+  assert.equal(issued.status, 201, issued.text);
+  const data = JSON.parse(issued.text);
+  assert.equal(data.tokenLimit, 500);
+  assert.equal(store.apiKey(data.key).user.id, user.id);
+  assert.deepEqual(store.keyModels(data.id).map((item) => item.accountId), [account.id]);
+  assert.equal(
+    (
+      await request(`/api/admin/users/${user.id}/keys`, {
+        method: "POST",
+        body: {
+          name: "bad-account",
+          tokenLimit: 500,
+          assignments: [{ model: "gemini-test", accountId: ensureAccount(other).id }],
+        },
+      })
+    ).status,
+    400,
+  );
+});
+await test("disabled accounts hide stale quotas and stop serving assigned models", async () => {
+  const disabledUser = await store.createUser(admin, {
+    login: "disabled",
+    password: "test-password-12345",
+  });
+  const account = ensureAccount(disabledUser);
+  const key = issueKey(disabledUser, "before-disable", { account });
+  const login = await store.login("disabled", "test-password-12345");
+  const response = await request(`/api/accounts/${account.id}`, {
+    method: "DELETE",
+    sessionCookie: "olm_session=" + login.token,
+    csrfToken: login.csrf,
+    body: {},
+  });
+  assert.equal(response.status, 200);
+  const accounts = JSON.parse(
+    (
+      await request("/api/accounts", {
+        sessionCookie: "olm_session=" + login.token,
+        csrfToken: login.csrf,
+      })
+    ).text,
+  ).accounts;
+  assert.equal(accounts[0].enabled, 0);
+  assert.equal(accounts[0].quota, null);
+  const models = await request("/v1/models", { key: key.key });
+  assert.deepEqual(JSON.parse(models.text).data, []);
+  assert.equal(
+    (
+      await request("/v1/messages", {
+        method: "POST",
+        body: payload,
+        key: key.key,
+      })
+    ).status,
+    403,
+  );
 });
 await test("OpenAI tool conversion, SSE framing and OAuth isolation", async () => {
   const converted = fromOpenAI({
@@ -628,8 +829,8 @@ await test("OpenAI tool conversion, SSE framing and OAuth isolation", async () =
   if (oldSecret === undefined) delete process.env.ANTIGRAVITY_CLIENT_SECRET;
   else process.env.ANTIGRAVITY_CLIENT_SECRET = oldSecret;
 });
-await test("invalid JSON, settings and unknown protocol fail safely", async () => {
-  const k = store.createKey(store.user(user.id), "invalid");
+await test("invalid JSON and unknown protocol fail safely", async () => {
+  const k = issueKey(user, "invalid");
   assert.equal(
     (
       await request("/v1/messages", {
@@ -650,21 +851,10 @@ await test("invalid JSON, settings and unknown protocol fail safely", async () =
     ).status,
     404,
   );
-  assert.equal(
-    (
-      await request("/api/settings", {
-        method: "PATCH",
-        body: {
-          mode: "stop",
-          sharedFallback: false,
-          accountId: "someone-elses",
-        },
-      })
-    ).status,
-    403,
-  );
+  assert.equal((await request("/api/settings", { method: "PATCH", body: {} })).status, 404);
 });
-await test("Deadswitch and failover keep account and model boundaries", async () => {
+await test("model route never fails over to a different connected account", async () => {
+  store.db.exec("DELETE FROM cooldowns");
   const first = store.db
     .prepare("SELECT * FROM accounts WHERE user_id=? LIMIT 1")
     .get(user.id);
@@ -676,15 +866,7 @@ await test("Deadswitch and failover keep account and model boundaries", async ()
   store.db
     .prepare("UPDATE accounts SET quota=? WHERE id=?")
     .run(JSON.stringify([{ id: "gemini-test", remaining: 1 }]), second.id);
-  const key = store.createKey(store.user(user.id), "failover");
-  store.db.prepare("UPDATE users SET settings=? WHERE id=?").run(
-    JSON.stringify({
-      mode: "stop",
-      accountId: first.id,
-      sharedFallback: false,
-    }),
-    user.id,
-  );
+  const key = issueKey(user, "pinned-account", { account: first });
   let attempts = [];
   provider.generate = async (a) => {
     attempts.push(a.id);
@@ -698,39 +880,31 @@ await test("Deadswitch and failover keep account and model boundaries", async ()
   });
   assert.equal(stopped.status, 429);
   assert.deepEqual(attempts, [first.id]);
-  store.db.exec("DELETE FROM cooldowns");
-  attempts = [];
-  store.db.prepare("UPDATE users SET settings=? WHERE id=?").run(
-    JSON.stringify({
-      mode: "auto",
-      accountId: first.id,
-      sharedFallback: false,
-    }),
-    user.id,
-  );
-  const switched = await request("/v1/messages", {
-    method: "POST",
-    body: payload,
-    key: key.key,
-  });
-  assert.equal(switched.status, 200, switched.text);
-  assert.deepEqual(attempts, [first.id, second.id]);
   assert.equal(
     store.db
       .prepare("SELECT model FROM cooldowns WHERE account_id=?")
       .get(first.id).model,
     "gemini-test",
   );
+  store.db.exec("DELETE FROM cooldowns");
+  attempts = [];
+  const backupKey = issueKey(user, "explicit-backup", { account: second });
+  const switched = await request("/v1/messages", {
+    method: "POST",
+    body: payload,
+    key: backupKey.key,
+  });
+  assert.equal(switched.status, 200, switched.text);
+  assert.deepEqual(attempts, [second.id]);
   provider.generate = async () => sse();
   store.db.exec("DELETE FROM cooldowns");
 });
-await test("concurrent paid requests cannot overspend the same balance", async () => {
+await test("concurrent requests cannot exceed an API key token cap", async () => {
   const u = await store.createUser(admin, {
     login: "concurrent",
     password: "test-password-12345",
   });
-  store.transfer(admin, u.id, 6000, "allocation");
-  const key = store.createKey(store.user(u.id), "parallel");
+  const key = issueKey(u, "parallel", { tokenLimit: 20 });
   let start, release;
   const began = new Promise((r) => (start = r)),
     gate = new Promise((r) => (release = r));
@@ -750,15 +924,22 @@ await test("concurrent paid requests cannot overspend the same balance", async (
     body: payload,
     key: key.key,
   });
-  assert.equal(second.status, 402, second.text);
+  assert.equal(second.status, 429, second.text);
   release();
   const done = await first;
   assert.equal(done.status, 200, done.text);
-  assert.equal(store.user(u.id).balance, 5982);
+  assert.equal(
+    store.db
+      .prepare("SELECT tokens_used FROM api_key_policies WHERE api_key_id=?")
+      .get(key.id)
+      .tokens_used,
+    14,
+  );
   provider.generate = async () => sse();
 });
 await test("native Gemini SSE and OpenAI tool chunks preserve their protocol", async () => {
-  const key = store.createKey(store.user(user.id), "protocols");
+  store.db.exec("DELETE FROM cooldowns");
+  const key = issueKey(user, "protocols");
   const native = await request(
     "/v1beta/models/gemini-test:streamGenerateContent",
     {
@@ -890,12 +1071,16 @@ await test("OAuth callback is single-use and reconnect clears stale quotas", asy
   else process.env.ANTIGRAVITY_CLIENT_SECRET = oldSecret;
 });
 await test("native SDK key header and exact token count endpoint", async () => {
-  const key = store.createKey(store.user(user.id), "native sdk");
+  const key = issueKey(user, "native sdk");
   let called = false;
-  provider.countTokens = async (a, m, contents) => {
+  provider.countTokens = async (a, m, request) => {
     called = true;
     assert.equal(m, "gemini-test");
-    assert.equal(contents[0].parts[0].text, "Hi");
+    assert.equal(request.contents[0].parts[0].text, "Hi");
+    assert.deepEqual(request.tools, [{ functionDeclarations: [] }]);
+    assert.deepEqual(request.systemInstruction, {
+      parts: [{ text: "Be concise" }],
+    });
     return { totalTokens: 7 };
   };
   const response = await fetch(
@@ -908,6 +1093,8 @@ await test("native SDK key header and exact token count endpoint", async () => {
       },
       body: JSON.stringify({
         contents: [{ role: "user", parts: [{ text: "Hi" }] }],
+        systemInstruction: { parts: [{ text: "Be concise" }] },
+        tools: [{ functionDeclarations: [] }],
       }),
     },
   );
@@ -931,15 +1118,46 @@ await test("native SDK key header and exact token count endpoint", async () => {
   assert.ok(
     (await models.json()).models.some((m) => m.name === "models/gemini-test"),
   );
+  provider.countTokens = async () => ({ totalTokens: 10 });
 });
-await test("accepted or uncertain paid requests retain reservations before the first output", async () => {
+await test("Antigravity countTokens includes system instructions and tools", async () => {
+  const account = ensureAccount(store.user(user.id));
+  let sent;
+  const client = new Antigravity(store, {
+    fetch: async (_url, options) => {
+      sent = JSON.parse(options.body);
+      return new Response(JSON.stringify({ totalTokens: 17 }));
+    },
+  });
+  client.tokens.set(account.id, {
+    token: "test-access-token",
+    until: Date.now() + 3600000,
+  });
+  const request = {
+    contents: [{ role: "user", parts: [{ text: "Hello" }] }],
+    systemInstruction: { parts: [{ text: "Be brief" }] },
+    tools: [{ functionDeclarations: [{ name: "lookup" }] }],
+    generationConfig: { maxOutputTokens: 128 },
+  };
+  assert.deepEqual(
+    await client.countTokens(account, "gemini-test", request),
+    { totalTokens: 17 },
+  );
+  assert.deepEqual(sent.request, {
+    model: "models/gemini-test",
+    contents: request.contents,
+    systemInstruction: request.systemInstruction,
+    tools: request.tools,
+  });
+});
+await test("uncertain generations charge the reserved token ceiling", async () => {
+  store.db.exec("DELETE FROM cooldowns");
   const u = await store.createUser(admin, {
     login: "cancelled",
     password: "test-password-12345",
   });
-  store.transfer(admin, u.id, 100000, "allocation");
-  const key = store.createKey(store.user(u.id), "cancel test");
   for (const mode of ["uncertain", "empty"]) {
+    const key = issueKey(u, `cancel-${mode}`, { tokenLimit: 138 });
     provider.generate = async () => {
       if (mode === "uncertain") {
         const e = new Fault(502, "transport lost");
@@ -954,28 +1172,24 @@ await test("accepted or uncertain paid requests retain reservations before the f
       key: key.key,
     });
     assert.equal(result.status, 502, result.text);
-    const reservation = store.db
-      .prepare("SELECT * FROM reservations WHERE user_id=?")
-      .get(u.id);
-    assert.ok(reservation);
-    assert.ok(store.user(u.id).balance < 100000);
+    const usage = store.db
+      .prepare(
+        "SELECT u.*,d.api_key_id,d.tokens FROM usage u JOIN usage_details d ON d.usage_id=u.id WHERE d.api_key_id=?",
+      )
+      .get(key.id);
+    assert.equal(usage.tokens, 138);
+    assert.equal(usage.state, "usage_unknown");
     assert.equal(
-      store.db.prepare("SELECT state FROM usage WHERE id=?").get(reservation.id)
-        .state,
-      "reconcile",
+      store.db.prepare("SELECT count(*) AS n FROM token_reservations").get().n,
+      0,
     );
     const again = await request("/v1/messages", {
       method: "POST",
       body: payload,
       key: key.key,
     });
-    assert.equal(again.status, 409);
-    store.settle(reservation.id, 0, {
-      input: null,
-      output: null,
-      state: "reconciled",
-    });
-    assert.equal(store.user(u.id).balance, 100000);
+    assert.equal(again.status, 429);
+    store.db.exec("DELETE FROM cooldowns");
   }
   provider.generate = async () => sse();
 });

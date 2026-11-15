@@ -487,6 +487,31 @@ dialog form {
   font-size: 12px;
   color: var(--muted);
 }
+.assignment-fields {
+  min-width: 0;
+  margin: 4px 0;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.assignment-fields legend {
+  padding: 0 6px;
+  font-weight: 600;
+}
+.assignment-editor {
+  display: grid;
+  gap: 10px;
+}
+.assignment-editor button {
+  justify-self: start;
+}
+.key-assignments {
+  display: grid;
+  gap: 3px;
+  margin: 10px 0 6px;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
 .skeleton {
   padding: 40px 0;
   color: var(--muted);

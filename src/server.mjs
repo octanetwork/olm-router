@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Store, Fault, requireThat, digest, secret } from "./core/store.mjs";
 import { Antigravity } from "./core/provider.mjs";
-import { gateway, candidates } from "./api/gateway.mjs";
+import { gateway } from "./api/gateway.mjs";
 const publicDir = fileURLToPath(new URL("./frontend/public/", import.meta.url));
 export async function readJson(req, max = 2 * 1024 * 1024) {
   const chunks = [];
@@ -89,6 +89,19 @@ export async function createApplication({
     res.end(
       `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="referrer" content="no-referrer"><title>OLM Router</title></head><body><p>${messages[result]}</p><a href="/?oauth=${result}">Вернуться в кабинет</a><script src="/oauth-return.js" data-result="${result}" defer></script></body></html>`,
     );
+  };
+  const assignedAccount = (keyId, userId, model) => {
+    const account = store.db
+      .prepare(
+        "SELECT a.* FROM api_key_models m JOIN accounts a ON a.id=m.account_id WHERE m.api_key_id=? AND m.model=? AND a.user_id=? AND a.enabled=1",
+      )
+      .get(keyId, model, userId);
+    requireThat(account, 403, "Эта модель не назначена API-ключу");
+    const quota = JSON.parse(account.quota || "[]").find(
+      (item) => item.id === model,
+    );
+    requireThat(quota, 409, "Модель больше не доступна в этом Google-аккаунте");
+    return account;
   };
   const json = (res, status, data) => {
     res.writeHead(status, {
@@ -230,10 +243,9 @@ export async function createApplication({
             user: store.publicUser(user),
             csrf: session.csrf,
             providerConfigured: provider.configured(),
-            creditScale: 1e6,
-            reserved: store.db
+            tokenReserved: store.db
               .prepare(
-                "SELECT coalesce(sum(amount),0) AS n FROM reservations WHERE user_id=?",
+                "SELECT coalesce(sum(r.amount),0) AS n FROM token_reservations r JOIN api_key_policies p ON p.api_key_id=r.api_key_id JOIN api_keys k ON k.id=p.api_key_id WHERE k.user_id=?",
               )
               .get(user.id).n,
           });
@@ -264,46 +276,37 @@ export async function createApplication({
           res.setHeader("Set-Cookie", cookie("", 0));
           return json(res, 200, { ok: true });
         }
-        if (p === "/api/settings" && method === "PATCH") {
-          const b = await readJson(req, 8192);
-          requireThat(
-            ["stop", "auto"].includes(b.mode) &&
-              typeof b.sharedFallback === "boolean",
-            400,
-            "Неверные настройки",
-          );
-          if (b.accountId)
-            requireThat(
-              store.db
-                .prepare(
-                  "SELECT id FROM accounts WHERE id=? AND user_id=? AND enabled=1",
-                )
-                .get(b.accountId, user.id),
-              403,
-              "Нет доступа к аккаунту",
-            );
-          store.db.prepare("UPDATE users SET settings=? WHERE id=?").run(
-            JSON.stringify({
-              mode: b.mode,
-              accountId: b.accountId || null,
-              sharedFallback: b.sharedFallback,
-            }),
-            user.id,
-          );
-          return json(res, 200, { ok: true });
-        }
         if (p === "/api/keys") {
           if (method === "GET")
             return json(res, 200, {
               keys: store.db
                 .prepare(
-                  "SELECT id,name,prefix,created FROM api_keys WHERE user_id=?",
+                  "SELECT k.id,k.name,k.prefix,k.created,p.token_limit AS tokenLimit,p.tokens_used AS tokensUsed,coalesce((SELECT sum(r.amount) FROM token_reservations r WHERE r.api_key_id=k.id),0) AS tokensReserved FROM api_keys k JOIN api_key_policies p ON p.api_key_id=k.id WHERE k.user_id=? ORDER BY k.created DESC",
                 )
-                .all(user.id),
+                .all(user.id)
+                .map((key) => ({
+                  ...key,
+                  assignments: store
+                    .keyModels(key.id)
+                    .map(({ model, accountId, email, enabled }) => ({
+                      model,
+                      accountId,
+                      email,
+                      enabled,
+                    })),
+                })),
             });
           if (method === "POST") {
             const b = await readJson(req, 8192);
-            return json(res, 201, store.createKey(user, b.name));
+            return json(
+              res,
+              201,
+              store.createKey(user, {
+                name: b.name,
+                assignments: b.assignments,
+                issuedBy: user.id,
+              }),
+            );
           }
         }
         if (p.startsWith("/api/keys/") && method === "DELETE") {
@@ -359,27 +362,11 @@ export async function createApplication({
               models: await provider.discover(a, controller.signal),
             });
           }
-          if (!action && method === "PATCH") {
-            const b = await readJson(req, 8192);
-            requireThat(typeof b.shared === "boolean", 400, "Укажите shared");
-            requireThat(
-              !b.shared || user.role !== "user",
-              403,
-              "Публиковать аккаунт может администратор",
-            );
-            store.db
-              .prepare("UPDATE accounts SET shared=? WHERE id=?")
-              .run(Number(b.shared), id);
-            store.audit(
-              user.id,
-              b.shared ? "account.publish" : "account.unpublish",
-              id,
-            );
-            return json(res, 200, { ok: true });
-          }
           if (!action && method === "DELETE") {
             store.db
-              .prepare("UPDATE accounts SET enabled=0,shared=0 WHERE id=?")
+              .prepare(
+                "UPDATE accounts SET enabled=0,shared=0,quota=NULL,checked=NULL WHERE id=?",
+              )
               .run(id);
             provider.tokens.delete(id);
             store.audit(user.id, "account.disable", id);
@@ -420,7 +407,7 @@ export async function createApplication({
           const prefix = `${year}-${String(month).padStart(2, "0")}`;
           const items = store.db
             .prepare(
-              "SELECT * FROM usage WHERE user_id=? AND created>=? AND created<? ORDER BY created DESC LIMIT 10000",
+              "SELECT u.*,d.api_key_id,d.tokens,a.email AS account_email,k.name AS key_name FROM usage u LEFT JOIN usage_details d ON d.usage_id=u.id LEFT JOIN accounts a ON a.id=u.account_id LEFT JOIN api_keys k ON k.id=d.api_key_id WHERE u.user_id=? AND u.created>=? AND u.created<? ORDER BY u.created DESC LIMIT 10000",
             )
             .all(user.id, start, end);
           const days = {};
@@ -430,13 +417,13 @@ export async function createApplication({
             const d = (days[day] ||= {
               input: 0,
               output: 0,
-              credits: 0,
+              tokens: 0,
               requests: 0,
               unknown: 0,
             });
             d.input += u.input || 0;
             d.output += u.output || 0;
-            d.credits += u.credits;
+            d.tokens += u.tokens || 0;
             d.requests++;
             if (u.input === null) d.unknown++;
           }
@@ -446,11 +433,6 @@ export async function createApplication({
             timezone: tz,
             days,
             recent: items.slice(0, 50).map(({ account_id, ...r }) => r),
-            ledger: store.db
-              .prepare(
-                "SELECT delta,reason,created FROM ledger WHERE user_id=? ORDER BY created DESC LIMIT 50",
-              )
-              .all(user.id),
           });
         }
         if (p.startsWith("/api/admin/")) {
@@ -458,14 +440,25 @@ export async function createApplication({
           if (p === "/api/admin/users" && method === "GET") {
             const list =
               user.role === "superadmin"
-                ? store.db.prepare("SELECT * FROM users ORDER BY login").all()
+                ? store.db
+                    .prepare(
+                      "SELECT u.*,coalesce((SELECT sum(d.tokens) FROM usage_details d JOIN usage x ON x.id=d.usage_id WHERE x.user_id=u.id),0) AS token_usage,coalesce((SELECT sum(r.amount) FROM token_reservations r JOIN api_key_policies p ON p.api_key_id=r.api_key_id JOIN api_keys k ON k.id=p.api_key_id WHERE k.user_id=u.id),0) AS reserved_tokens FROM users u ORDER BY u.login",
+                    )
+                    .all()
                 : store.db
                     .prepare(
-                      "SELECT * FROM users WHERE manager=? ORDER BY login",
+                      "SELECT u.*,coalesce((SELECT sum(d.tokens) FROM usage_details d JOIN usage x ON x.id=d.usage_id WHERE x.user_id=u.id),0) AS token_usage,coalesce((SELECT sum(r.amount) FROM token_reservations r JOIN api_key_policies p ON p.api_key_id=r.api_key_id JOIN api_keys k ON k.id=p.api_key_id WHERE k.user_id=u.id),0) AS reserved_tokens FROM users u WHERE u.manager=? ORDER BY u.login",
                     )
                     .all(user.id);
             return json(res, 200, {
-              users: list.map((u) => store.publicUser(u)),
+              users: list.map((u) => ({
+                ...store.publicUser(u),
+                tokenUsage: u.token_usage,
+                reservedTokens: u.reserved_tokens || 0,
+                keyCount: store.db
+                  .prepare("SELECT count(*) AS n FROM api_keys WHERE user_id=?")
+                  .get(u.id).n,
+              })),
             });
           }
           if (p === "/api/admin/users" && method === "POST")
@@ -484,9 +477,59 @@ export async function createApplication({
               403,
               "Нет доступа к пользователю",
             );
-            if (p.endsWith("/credits") && method === "POST") {
+            if (p.endsWith("/accounts") && method === "GET")
+              return json(res, 200, {
+                accounts: store.db
+                  .prepare("SELECT * FROM accounts WHERE user_id=? AND enabled=1")
+                  .all(id)
+                  .map((a) => ({
+                    ...store.accountSafe(a),
+                    email: a.email,
+                  })),
+              });
+            if (p.endsWith("/keys") && method === "GET")
+              return json(res, 200, {
+                keys: store.db
+                  .prepare(
+                    "SELECT k.id,k.name,k.prefix,k.created,p.token_limit AS tokenLimit,p.tokens_used AS tokensUsed,coalesce((SELECT sum(r.amount) FROM token_reservations r WHERE r.api_key_id=k.id),0) AS tokensReserved FROM api_keys k JOIN api_key_policies p ON p.api_key_id=k.id WHERE k.user_id=? ORDER BY k.created DESC",
+                  )
+                  .all(id)
+                  .map((key) => ({
+                    ...key,
+                    assignments: store
+                      .keyModels(key.id)
+                      .map(({ model, accountId, email, enabled }) => ({
+                        model,
+                        accountId,
+                        email,
+                        enabled,
+                      })),
+                  })),
+              });
+            if (p.endsWith("/keys") && method === "POST") {
               const b = await readJson(req, 8192);
-              store.transfer(user, id, b.amount, b.reason);
+              requireThat(
+                Number.isSafeInteger(b.tokenLimit) && b.tokenLimit > 0,
+                400,
+                "Укажите положительный лимит токенов",
+              );
+              return json(
+                res,
+                201,
+                store.createKey(target, {
+                  name: b.name,
+                  assignments: b.assignments,
+                  tokenLimit: b.tokenLimit,
+                  issuedBy: user.id,
+                }),
+              );
+            }
+            const keyPath = p.match(/^\/api\/admin\/users\/[^/]+\/keys\/([^/]+)$/);
+            if (keyPath && method === "DELETE") {
+              store.db
+                .prepare("DELETE FROM api_keys WHERE id=? AND user_id=?")
+                .run(keyPath[1], id);
+              store.audit(user.id, "key.revoke", keyPath[1]);
               return json(res, 200, { ok: true });
             }
             if (method === "PATCH") {
@@ -524,65 +567,6 @@ export async function createApplication({
               return json(res, 200, { ok: true });
             }
           }
-          if (p === "/api/admin/prices" && method === "GET")
-            return json(res, 200, {
-              prices: store.db
-                .prepare("SELECT * FROM prices")
-                .all()
-                .map((p) => ({ model: p.model, ...JSON.parse(p.value) })),
-            });
-          if (p === "/api/admin/prices" && method === "POST") {
-            requireThat(user.role === "superadmin", 403, "Недостаточно прав");
-            const b = await readJson(req, 8192);
-            requireThat(
-              typeof b.model === "string" &&
-                b.model.length <= 150 &&
-                [b.input, b.output].every(
-                  (n) => Number.isSafeInteger(n) && n > 0 && n <= 1e12,
-                ),
-              400,
-              "Укажите положительные цены input/output",
-            );
-            store.db
-              .prepare(
-                "INSERT INTO prices VALUES(?,?) ON CONFLICT(model) DO UPDATE SET value=excluded.value",
-              )
-              .run(
-                b.model,
-                JSON.stringify({ input: b.input, output: b.output }),
-              );
-            store.audit(user.id, "price.set", b.model);
-            return json(res, 200, { ok: true });
-          }
-          if (p === "/api/admin/reconcile" && method === "GET") {
-            requireThat(user.role === "superadmin", 403, "Недостаточно прав");
-            return json(res, 200, {
-              reservations: store.db
-                .prepare(
-                  "SELECT r.*,u.login FROM reservations r JOIN users u ON u.id=r.user_id JOIN usage x ON x.id=r.id WHERE x.state='reconcile'",
-                )
-                .all(),
-            });
-          }
-          if (p === "/api/admin/reconcile" && method === "POST") {
-            requireThat(user.role === "superadmin", 403, "Недостаточно прав");
-            const b = await readJson(req, 8192);
-            requireThat(
-              store.db
-                .prepare(
-                  "SELECT r.id FROM reservations r JOIN usage u ON u.id=r.id WHERE r.id=? AND u.state='reconcile'",
-                )
-                .get(b.id),
-              409,
-              "Запрос не ожидает сверки",
-            );
-            const usage = store.db
-              .prepare("SELECT input,output FROM usage WHERE id=?")
-              .get(b.id);
-            store.settle(b.id, b.cost, { ...usage, state: "reconciled" });
-            store.audit(user.id, "usage.reconcile", b.id);
-            return json(res, 200, { ok: true });
-          }
           if (p === "/api/admin/audit" && method === "GET") {
             requireThat(user.role === "superadmin", 403, "Недостаточно прав");
             return json(res, 200, {
@@ -604,19 +588,18 @@ export async function createApplication({
         const auth = store.apiKey(key);
         requireThat(auth, 401, "Неверный или отсутствующий API-ключ");
         const user = auth.user;
-        limiter.check("api:" + user.id, 60);
+        limiter.check("api:" + auth.id, 60);
         if (
           (p === "/v1/models" || p === "/v1beta/models") &&
           method === "GET"
         ) {
-          const ids = new Set();
-          const accounts = store.db
-            .prepare(
-              "SELECT * FROM accounts WHERE enabled=1 AND (user_id=? OR shared=1)",
+          const ids = store
+            .keyModels(auth.id)
+            .filter(
+              (assignment) =>
+                assignment.enabled && assignment.models.includes(assignment.model),
             )
-            .all(user.id);
-          for (const a of accounts)
-            for (const m of JSON.parse(a.quota || "[]")) ids.add(m.id);
+            .map((assignment) => assignment.model);
           if (p.startsWith("/v1beta"))
             return json(res, 200, {
               models: [...ids].map((id) => ({
@@ -668,19 +651,14 @@ export async function createApplication({
                 "Требуется contents",
               );
               if (m[2] === "countTokens") {
-                const allowed = candidates(store, user, m[1]);
-                requireThat(
-                  allowed.length,
-                  409,
-                  "Нет доступного аккаунта для подсчёта токенов",
-                );
+                const account = assignedAccount(auth.id, user.id, m[1]);
                 return json(
                   res,
                   200,
                   await provider.countTokens(
-                    allowed[0],
+                    account,
                     m[1],
-                    body.contents,
+                    body,
                     controller.signal,
                   ),
                 );
@@ -693,6 +671,11 @@ export async function createApplication({
                 stream: m[2] === "streamGenerateContent",
               };
             }
+            const account = assignedAccount(
+              auth.id,
+              user.id,
+              body.model,
+            );
             await gateway({
               store,
               provider,
@@ -706,6 +689,8 @@ export async function createApplication({
               protocol,
               nativeRequest,
               scope: auth.id,
+              assignedAccount: account,
+              apiKey: auth,
             });
             return;
           } finally {
@@ -776,8 +761,19 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     key = fs.readFileSync(f, "utf8").trim();
   }
   const store = new Store(dir, key);
+  const abandoned = store.db
+    .prepare(
+      "SELECT r.id,r.amount,u.input FROM token_reservations r JOIN usage u ON u.id=r.id WHERE u.state='pending'",
+    )
+    .all();
+  for (const item of abandoned)
+    store.settleKeyTokens(item.id, item.amount, {
+      input: item.input,
+      output: null,
+      state: "usage_unknown",
+    });
   store.db
-    .prepare("UPDATE usage SET state='reconcile' WHERE state='pending'")
+    .prepare("UPDATE usage SET state='usage_unknown' WHERE state='pending'")
     .run();
   await store.bootstrap(process.env.OLM_BOOTSTRAP_FILE);
   const provider = new Antigravity(store);

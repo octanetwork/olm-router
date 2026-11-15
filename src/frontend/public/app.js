@@ -4,10 +4,6 @@ let me,
   view = "usage",
   month = new Date(),
   noticeTimer;
-const credit = (n) =>
-  new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 6 }).format(
-    (n || 0) / 1e6,
-  );
 const number = (n) =>
   n === null ? "Нет данных" : new Intl.NumberFormat("ru-RU").format(n || 0);
 const date = (n) => new Date(n).toLocaleString("ru-RU");
@@ -159,7 +155,7 @@ async function refreshMe() {
   const d = await api("/api/me");
   me = d.user;
   csrf = d.csrf;
-  me.reserved = d.reserved;
+  me.tokenReserved = d.tokenReserved;
   me.configured = d.providerConfigured;
 }
 async function logout() {
@@ -176,7 +172,6 @@ async function shell() {
     ["settings", "Настройки"],
   ];
   if (me.role !== "user") navs.push(["users", "Пользователи"]);
-  if (me.role === "superadmin") navs.push(["prices", "Цены и сверка"]);
   const nav = el(
     "nav",
     { "aria-label": "Навигация" },
@@ -220,7 +215,6 @@ async function navigate(next) {
           clients: "Подключение",
           settings: "Настройки",
           users: "Пользователи",
-          prices: "Цены и сверка",
         }[view],
     );
   const main = document.querySelector("main");
@@ -233,7 +227,6 @@ async function navigate(next) {
       clients: clientsView,
       settings: settingsView,
       users: usersView,
-      prices: pricesView,
     }[view](main);
   } catch (e) {
     main.replaceChildren(
@@ -253,10 +246,10 @@ async function usageView(main) {
     (a, d) => ({
       input: a.input + d.input,
       output: a.output + d.output,
-      credits: a.credits + d.credits,
+      tokens: a.tokens + d.tokens,
       requests: a.requests + d.requests,
     }),
-    { input: 0, output: 0, credits: 0, requests: 0 },
+    { input: 0, output: 0, tokens: 0, requests: 0 },
   );
   const grid = el("div", { class: "calendar" });
   for (const d of ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"])
@@ -284,7 +277,7 @@ async function usageView(main) {
           b.classList.remove("selected");
         b.classList.add("selected");
         detail.textContent = d
-          ? `${day} ${month.toLocaleDateString("ru-RU", { month: "long" })}: ${number(d.input)} входных, ${number(d.output)} выходных токенов · ${credit(d.credits)} credits${d.unknown ? " · Есть запросы без точного usage" : ""}`
+          ? `${day} ${month.toLocaleDateString("ru-RU", { month: "long" })}: ${number(d.input)} входных, ${number(d.output)} выходных, всего ${number(d.tokens)} токенов${d.unknown ? " · Есть запросы без точного usage" : ""}`
           : `${day}: запросов нет`;
       },
       "day" + (d?.requests ? " used" : "") + (d?.requests > 20 ? " busy" : ""),
@@ -304,30 +297,30 @@ async function usageView(main) {
       el(
         "div",
         {},
-        el("small", {}, "Баланс"),
-        el("strong", {}, credit(me.balance)),
-        el("small", {}, "credits"),
-      ),
-      el(
-        "div",
-        {},
         el("small", {}, "За месяц"),
-        el("strong", {}, number(totals.input + totals.output)),
-        el("small", {}, "токенов"),
+        el("strong", {}, number(totals.tokens)),
+        el("small", {}, "токенов за месяц"),
       ),
       el(
         "div",
         {},
-        el("small", {}, "Списано"),
-        el("strong", {}, credit(totals.credits)),
-        el("small", {}, "credits"),
+        el("small", {}, "Входные"),
+        el("strong", {}, number(totals.input)),
+        el("small", {}, "токены"),
+      ),
+      el(
+        "div",
+        {},
+        el("small", {}, "Выходные"),
+        el("strong", {}, number(totals.output)),
+        el("small", {}, "токены"),
       ),
     ),
-    me.reserved
+    me.tokenReserved
       ? el(
           "p",
           { class: "note" },
-          `В резерве ${credit(me.reserved)} credits. Запросы без итогового usage проверяет superadmin.`,
+          `Для активных запросов зарезервировано до ${number(me.tokenReserved)} токенов. Неопределённое потребление учитывается по верхней границе запроса.`,
         )
       : null,
     el(
@@ -360,12 +353,17 @@ async function usageView(main) {
       el("h2", {}, "Последние запросы"),
       data.recent.length
         ? table(
-            ["Модель", "Токены", "Источник", "Credits", "Время"],
+            ["Модель", "Токены", "API-ключ", "Аккаунт", "Статус", "Время"],
             data.recent.map((u) => [
               u.model,
-              u.input === null ? "Нет данных" : number(u.input + u.output),
-              u.source === "own" ? "Свой аккаунт" : "Общий пул",
-              credit(u.credits) + (u.state === "reconcile" ? " · сверка" : ""),
+              u.state === "usage_unknown"
+                ? u.tokens
+                  ? `до ${number(u.tokens)} (оценка)`
+                  : "Нет данных"
+                : number(u.tokens),
+              u.key_name || "Удалённый ключ",
+              u.account_email || "Аккаунт удалён",
+              u.state === "complete" ? "Завершён" : u.state,
               date(u.created),
             ]),
           )
@@ -461,11 +459,10 @@ async function accountsView(main) {
       el(
         "div",
         { class: "empty" },
-        "Подключите свой аккаунт. Credits за его использование не списываются.",
+        "Подключите Google-аккаунт, чтобы привязать его модели к API-ключу.",
       ),
     );
   for (const a of accounts) {
-    const active = me.settings.accountId === a.id;
     const quotas = el("div", { class: "quota" });
     for (const q of a.quota || []) {
       const meter = el("meter", {
@@ -499,29 +496,12 @@ async function accountsView(main) {
       "div",
       { class: "actions" },
       a.enabled
-        ? button(active ? "Выбран" : "Выбрать", async () => {
-            await api("/api/settings", "PATCH", {
-              ...me.settings,
-              accountId: a.id,
-            });
-            await refreshMe();
-            await navigate("accounts");
-          })
-        : null,
-      a.enabled
         ? button("Обновить", async () => {
             await api(`/api/accounts/${a.id}/refresh`, "POST", {});
             await navigate("accounts");
           })
         : null,
     );
-    if (me.role !== "user" && a.enabled)
-      actions.append(
-        button(a.shared ? "Убрать из пула" : "В общий пул", async () => {
-          await api("/api/accounts/" + a.id, "PATCH", { shared: !a.shared });
-          await navigate("accounts");
-        }),
-      );
     if (a.enabled)
       actions.append(
         button(
@@ -550,15 +530,17 @@ async function accountsView(main) {
               el(
                 "span",
                 { class: "tag" },
-                !a.enabled ? "Отключён" : a.shared ? "Общий пул" : "Приватный",
+                !a.enabled ? "Отключён" : "Подключён",
               ),
             ),
             el(
               "small",
               {},
-              a.checked
+              a.enabled && a.checked
                 ? "Проверено " + date(a.checked)
-                : "Квоты ещё не получены",
+                : a.enabled
+                  ? "Квоты ещё не получены"
+                  : "Подключение отключено",
             ),
           ),
           actions,
@@ -575,97 +557,123 @@ async function accountsView(main) {
       button("Подключить Google", connectGoogle, "primary"),
     ),
     list,
+  );
+}
+function modelAccountSelect(accounts) {
+  const options = accounts.flatMap((account) =>
+    (account.quota || []).map((model) =>
+      el(
+        "option",
+        { value: JSON.stringify([account.id, model.id]) },
+        `${model.name || model.id} — ${account.email}`,
+      ),
+    ),
+  );
+  return el("select", { "data-assignment": "" }, options);
+}
+function assignmentEditor(accounts) {
+  const rows = el("div", { class: "assignment-editor" });
+  const add = () => rows.insertBefore(modelAccountSelect(accounts), control);
+  const control = button("Добавить модель", add);
+  rows.append(control);
+  if (accounts.some((account) => (account.quota || []).length))
+    add();
+  return rows;
+}
+async function issueKeyDialog(target = null) {
+  const { accounts } = target
+    ? await api(`/api/admin/users/${target.id}/accounts`)
+    : await api("/api/accounts");
+  const available = accounts.some((account) => (account.quota || []).length);
+  if (!available) {
+    notify("Сначала подключите аккаунт и обновите его список моделей");
+    return;
+  }
+  const assignments = assignmentEditor(accounts);
+  let d;
+  d = dialog(
+    target ? `Выдать ключ: ${target.login}` : "Новый API-ключ",
     form(
       [
+        field("Название", "name"),
+        target
+          ? field("Лимит токенов на весь срок ключа", "tokenLimit", "number", {
+              min: 1,
+              step: 1,
+              inputmode: "numeric",
+            })
+          : el(
+              "p",
+              { class: "note" },
+              "Ключ использует только выбранные модели и аккаунты. Внутреннего лимита нет, действуют квоты Google.",
+            ),
         el(
-          "label",
-          {},
-          "Когда квота закончится",
+          "fieldset",
+          { class: "assignment-fields" },
+          el("legend", {}, "Модель → аккаунт"),
+          assignments,
           el(
-            "select",
-            { name: "mode" },
-            el(
-              "option",
-              {
-                value: "stop",
-                selected: me.settings.mode === "stop" ? "" : undefined,
-              },
-              "Остановить (Deadswitch)",
-            ),
-            el(
-              "option",
-              {
-                value: "auto",
-                selected: me.settings.mode === "auto" ? "" : undefined,
-              },
-              "Переключить на мой следующий аккаунт",
-            ),
+            "small",
+            {},
+            "Каждая модель этого ключа всегда использует указанный аккаунт. Переключения на другие аккаунты нет.",
           ),
-        ),
-        el(
-          "label",
-          { class: "checkbox" },
-          el("input", {
-            type: "checkbox",
-            name: "sharedFallback",
-            checked: me.settings.sharedFallback,
-          }),
-          "Разрешить общий пул со списанием credits",
         ),
       ],
       async (b) => {
-        await api("/api/settings", "PATCH", {
-          ...me.settings,
-          mode: b.mode,
-          sharedFallback: b.sharedFallback === "on",
+        const selected = [...assignments.querySelectorAll("select")].map(
+          (select) => {
+            const [accountId, model] = JSON.parse(select.value);
+            return { accountId, model };
+          },
+        );
+        const path = target
+          ? `/api/admin/users/${target.id}/keys`
+          : "/api/keys";
+        const key = await api(path, "POST", {
+          name: b.name,
+          assignments: selected,
+          ...(target ? { tokenLimit: Number(b.tokenLimit) } : {}),
         });
-        await refreshMe();
-        notify("Настройки сохранены");
+        d.close();
+        await navigate(target ? "users" : "keys");
+        dialog(
+          "Сохраните API-ключ",
+          el(
+            "div",
+            {},
+            el("p", {}, "Полностью ключ показывается только один раз."),
+            el("pre", { class: "code-key" }, key.key),
+            button("Скопировать", () => copy(key.key)),
+          ),
+        );
       },
-      "Сохранить",
-      "narrow",
+      "Создать ключ",
     ),
   );
 }
 async function keysView(main) {
   const { keys } = await api("/api/keys");
+  const accountData = await api("/api/accounts");
+  const canCreate = accountData.accounts.some((account) => (account.quota || []).length);
   main.replaceChildren(
     el(
       "div",
       { class: "topline" },
       el("h1", {}, "API-ключи"),
-      button(
-        "Создать ключ",
-        () => {
-          const d = dialog(
-            "Новый API-ключ",
-            form(
-              [field("Название", "name")],
-              async (b) => {
-                const k = await api("/api/keys", "POST", b);
-                d.close();
-                await navigate("keys");
-                dialog(
-                  "Сохраните ключ",
-                  el(
-                    "div",
-                    {},
-                    el("p", {}, "Полностью он показывается только сейчас."),
-                    el("pre", { class: "code-key" }, k.key),
-                    button("Скопировать", () => copy(k.key)),
-                  ),
-                );
-              },
-              "Создать",
-            ),
-          );
-        },
-        "primary",
-      ),
+      canCreate
+        ? button("Создать ключ", () => issueKeyDialog(), "primary")
+        : null,
     ),
     el(
       "section",
       { class: "panel" },
+      !canCreate
+        ? el(
+            "p",
+            { class: "note" },
+            "Подключите аккаунт и обновите модели в разделе «Аккаунты», прежде чем создавать ключ.",
+          )
+        : null,
       keys.length
         ? keys.map((k) =>
             el(
@@ -677,6 +685,31 @@ async function keysView(main) {
                 el("strong", {}, k.name),
                 el("div", { class: "muted" }, k.prefix + "…"),
                 el("small", {}, date(k.created)),
+                  el(
+                    "div",
+                    { class: "key-assignments" },
+                    k.assignments.map((assignment) =>
+                      el(
+                        "div",
+                        {},
+                        `${assignment.model} → ${assignment.email}${assignment.enabled ? "" : " · аккаунт отключён"}`,
+                      ),
+                    ),
+                  ),
+                  el(
+                    "small",
+                    {},
+                    k.tokenLimit === null
+                      ? `${number(k.tokensUsed)} токенов использовано · лимит Google`
+                      : `${number(k.tokensUsed)} из ${number(k.tokenLimit)} токенов использовано`,
+                  ),
+                  k.tokensReserved
+                    ? el(
+                        "small",
+                        {},
+                        `Зарезервировано: ${number(k.tokensReserved)} токенов`,
+                      )
+                    : null,
               ),
               button(
                 "Отозвать",
@@ -697,9 +730,8 @@ async function keysView(main) {
   );
 }
 async function clientsView(main) {
-  const { accounts } = await api("/api/accounts");
-  const model =
-    accounts.flatMap((a) => a.quota || [])[0]?.id || "MODEL_FROM_V1_MODELS";
+  const { keys } = await api("/api/keys");
+  const model = keys.flatMap((key) => key.assignments)[0]?.model || "MODEL_FROM_V1_MODELS";
   const tabs = el("div", { class: "client-tabs" }),
     code = el("pre"),
     desc = el("p", { class: "muted" });
@@ -835,41 +867,77 @@ async function usersView(main) {
       "section",
       { class: "panel" },
       table(
-        ["Логин", "Роль", "Credits", "Доступ", ""],
+        ["Логин", "Роль", "API-ключи", "Всего токенов", "Доступ", ""],
         users.map((u) => [
           u.login,
           u.role,
-          credit(u.balance),
+          number(u.keyCount),
+          u.reservedTokens
+            ? `${number(u.tokenUsage)} (+${number(u.reservedTokens)} в работе)`
+            : number(u.tokenUsage),
           u.enabled ? "Открыт" : "Закрыт",
           u.id === me.id
             ? ""
             : el(
                 "div",
                 { class: "actions" },
-                button("Выдать credits", () => {
-                  let d;
-                  d = dialog(
-                    "Credits: " + u.login,
-                    form(
-                      [
-                        field("Количество credits", "amount", "number", {
-                          min: 0.000001,
-                          step: 0.000001,
-                        }),
-                        field("Причина", "reason"),
-                      ],
-                      async (b) => {
-                        await api(`/api/admin/users/${u.id}/credits`, "POST", {
-                          amount: Math.round(Number(b.amount) * 1e6),
-                          reason: b.reason,
-                        });
-                        d.close();
-                        await navigate("users");
-                      },
-                      "Выдать",
-                    ),
+                button("Ключи", async () => {
+                  let keyDialog;
+                  const { keys } = await api(`/api/admin/users/${u.id}/keys`);
+                  keyDialog = dialog(
+                    `API-ключи: ${u.login}`,
+                    keys.length
+                      ? el(
+                          "div",
+                          {},
+                          keys.map((key) =>
+                            el(
+                              "article",
+                              { class: "list-item" },
+                              el(
+                                "div",
+                                { class: "row wrap" },
+                                el(
+                                  "div",
+                                  {},
+                                  el("strong", {}, key.name),
+                                  el(
+                                    "div",
+                                    { class: "muted" },
+                                    `${key.prefix}… · ${number(key.tokensUsed)} из ${key.tokenLimit === null ? "∞" : number(key.tokenLimit)} токенов${key.tokensReserved ? ` · ${number(key.tokensReserved)} в работе` : ""}`,
+                                  ),
+                                  key.assignments.map((assignment) =>
+                                    el(
+                                      "small",
+                                      {},
+                                      `${assignment.model} → ${assignment.email}${assignment.enabled ? "" : " · отключён"}`,
+                                    ),
+                                  ),
+                                ),
+                                button(
+                                  "Отозвать",
+                                  async () => {
+                                    await api(
+                                      `/api/admin/users/${u.id}/keys/${key.id}`,
+                                      "DELETE",
+                                      {},
+                                    );
+                                    notify("Ключ отозван");
+                                    keyDialog.close();
+                                    await navigate("users");
+                                  },
+                                  "danger",
+                                ),
+                              ),
+                            ),
+                          ),
+                        )
+                      : el("p", { class: "empty" }, "Ключей пока нет"),
                   );
                 }),
+                u.enabled
+                  ? button("Выдать ключ", () => issueKeyDialog(u), "primary")
+                  : null,
                 button(u.enabled ? "Отключить" : "Включить", async () => {
                   await api("/api/admin/users/" + u.id, "PATCH", {
                     enabled: !u.enabled,
@@ -879,97 +947,6 @@ async function usersView(main) {
               ),
         ]),
       ),
-    ),
-  );
-}
-async function pricesView(main) {
-  const [{ prices }, { reservations }] = await Promise.all([
-    api("/api/admin/prices"),
-    api("/api/admin/reconcile"),
-  ]);
-  main.replaceChildren(
-    el("h1", {}, "Цены и сверка"),
-    el(
-      "section",
-      { class: "panel" },
-      el("h2", {}, "Credits за миллион токенов"),
-      prices.length
-        ? table(
-            ["Модель", "Вход", "Выход"],
-            prices.map((p) => [p.model, credit(p.input), credit(p.output)]),
-          )
-        : el(
-            "p",
-            { class: "empty" },
-            "Без цены модель недоступна в общем пуле.",
-          ),
-      form(
-        [
-          field("Модель", "model"),
-          field("Input credits / 1M", "input", "number", {
-            min: 0.000001,
-            step: 0.000001,
-          }),
-          field("Output credits / 1M", "output", "number", {
-            min: 0.000001,
-            step: 0.000001,
-          }),
-        ],
-        async (b) => {
-          await api("/api/admin/prices", "POST", {
-            model: b.model,
-            input: Math.round(Number(b.input) * 1e6),
-            output: Math.round(Number(b.output) * 1e6),
-          });
-          await navigate("prices");
-        },
-        "Сохранить",
-        "inline-form",
-      ),
-    ),
-    el(
-      "section",
-      { class: "panel" },
-      el("h2", {}, "Запросы на сверку"),
-      reservations.length
-        ? reservations.map((r) =>
-            el(
-              "div",
-              { class: "list-item row" },
-              el(
-                "div",
-                {},
-                el("strong", {}, r.login),
-                el("div", {}, credit(r.amount) + " credits в резерве"),
-                el("small", {}, date(r.created)),
-              ),
-              button("Сверить", () => {
-                let d;
-                d = dialog(
-                  "Итоговое списание",
-                  form(
-                    [
-                      field("Credits", "cost", "number", {
-                        min: 0,
-                        max: r.amount / 1e6,
-                        step: 0.000001,
-                      }),
-                    ],
-                    async (b) => {
-                      await api("/api/admin/reconcile", "POST", {
-                        id: r.id,
-                        cost: Math.round(Number(b.cost) * 1e6),
-                      });
-                      d.close();
-                      await navigate("prices");
-                    },
-                    "Подтвердить",
-                  ),
-                );
-              }),
-            ),
-          )
-        : el("p", { class: "empty" }, "Сверка не требуется."),
     ),
   );
 }
