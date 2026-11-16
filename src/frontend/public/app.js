@@ -1,12 +1,48 @@
 const root = document.querySelector("#app");
 let me,
   csrf,
-  view = "usage",
+  view = "chat",
   month = new Date(),
-  noticeTimer;
+  noticeTimer,
+  chatMessages = [],
+  chatSelection = "",
+  chatAbortController = null;
 const number = (n) =>
   n === null ? "Нет данных" : new Intl.NumberFormat("ru-RU").format(n || 0);
 const date = (n) => new Date(n).toLocaleString("ru-RU");
+const iconPaths = {
+  chat: '<path d="M21 15a4 4 0 0 1-4 4H7l-4 2V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/>',
+  usage:
+    '<path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/>',
+  accounts:
+    '<path d="M2 20a7 7 0 0 1 14 0"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6"/><path d="M22 11h-6"/>',
+  key: '<path d="M2.6 17.4a2 2 0 0 0 2.8 0l6.4-6.4a6 6 0 1 0-2.8-2.8l-6.4 6.4a2 2 0 0 0 0 2.8Z"/><path d="m14 6 1 1"/>',
+  clients:
+    '<path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v4a6 6 0 0 1-12 0V8z"/>',
+  settings:
+    '<path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z"/><path d="m19.4 15 .1.1 1.4 1.1-1.4 2.4-1.7-.6a8 8 0 0 1-1.8 1l-.3 1.8h-2.8l-.3-1.8a8 8 0 0 1-1.8-1l-1.7.6-1.4-2.4 1.4-1.1a8 8 0 0 1 0-2l-1.4-1.1 1.4-2.4 1.7.6a8 8 0 0 1 1.8-1l.3-1.8h2.8l.3 1.8a8 8 0 0 1 1.8 1l1.7-.6 1.4 2.4-1.4 1.1a8 8 0 0 1-.1 2Z"/>',
+  users:
+    '<path d="M16 21a7 7 0 0 0-14 0"/><circle cx="9" cy="7" r="4"/><path d="M22 21a7 7 0 0 0-5-6.7"/><path d="M16 3.3a4 4 0 0 1 0 7.4"/>',
+  logout:
+    '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/>',
+  plus: '<path d="M12 5v14"/><path d="M5 12h14"/>',
+  send: '<path d="m5 12 7-7 7 7"/><path d="M12 19V5"/>',
+  stop: '<rect width="14" height="14" x="5" y="5" rx="2"/>',
+};
+function icon(name, size = 18) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("width", String(size));
+  svg.setAttribute("height", String(size));
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "1.8");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("stroke-linejoin", "round");
+  svg.setAttribute("aria-hidden", "true");
+  svg.innerHTML = iconPaths[name] || "";
+  return svg;
+}
 function el(tag, props = {}, ...children) {
   const n = document.createElement(tag);
   for (const [k, v] of Object.entries(props)) {
@@ -119,6 +155,10 @@ async function copy(text) {
   notify("Скопировано");
 }
 function login() {
+  chatAbortController?.abort();
+  chatAbortController = null;
+  chatMessages = [];
+  chatSelection = "";
   me = null;
   root.replaceChildren(
     el(
@@ -159,25 +199,31 @@ async function refreshMe() {
   me.configured = d.providerConfigured;
 }
 async function logout() {
+  chatAbortController?.abort();
+  chatMessages = [];
   await api("/api/logout", "POST", {});
   login();
 }
 async function shell() {
   await refreshMe();
   const navs = [
-    ["usage", "Потребление"],
-    ["accounts", "Аккаунты"],
-    ["keys", "API-ключи"],
-    ["clients", "Подключение"],
-    ["settings", "Настройки"],
+    ["chat", "Чат", "chat"],
+    ["usage", "Потребление", "usage"],
+    ["accounts", "Аккаунты", "accounts"],
+    ["keys", "API-ключи", "key"],
+    ["clients", "Подключение", "clients"],
+    ["settings", "Настройки", "settings"],
   ];
-  if (me.role !== "user") navs.push(["users", "Пользователи"]);
+  if (me.role !== "user") navs.push(["users", "Пользователи", "users"]);
   const nav = el(
     "nav",
     { "aria-label": "Навигация" },
-    navs.map(([id, label]) =>
-      button(label, () => navigate(id), view === id ? "active" : ""),
-    ),
+    navs.map(([id, label, glyph]) => {
+      const item = button("", () => navigate(id), view === id ? "active" : "");
+      item.dataset.view = id;
+      item.append(icon(glyph), el("span", {}, label));
+      return item;
+    }),
   );
   const main = el("main", { id: "main" });
   root.replaceChildren(
@@ -194,7 +240,11 @@ async function shell() {
           { class: "profile" },
           el("strong", {}, me.login),
           el("span", { class: "role" }, me.role),
-          button("Выйти", logout),
+          (() => {
+            const out = button("Выйти", logout);
+            out.prepend(icon("logout", 16));
+            return out;
+          })(),
         ),
       ),
       main,
@@ -203,24 +253,20 @@ async function shell() {
   await navigate(view);
 }
 async function navigate(next) {
+  if (view === "chat" && next !== "chat") chatAbortController?.abort();
   view = next;
-  for (const b of document.querySelectorAll("nav button"))
-    b.classList.toggle(
-      "active",
-      b.textContent ===
-        {
-          usage: "Потребление",
-          accounts: "Аккаунты",
-          keys: "API-ключи",
-          clients: "Подключение",
-          settings: "Настройки",
-          users: "Пользователи",
-        }[view],
-    );
   const main = document.querySelector("main");
+  for (const b of document.querySelectorAll("nav button")) {
+    const active = b.dataset.view === view;
+    b.classList.toggle("active", active);
+    if (active) b.setAttribute("aria-current", "page");
+    else b.removeAttribute("aria-current");
+  }
+  main.classList.toggle("chat-main", view === "chat");
   main.replaceChildren(el("div", { class: "skeleton" }, "Загрузка…"));
   try {
     await {
+      chat: chatView,
       usage: usageView,
       accounts: accountsView,
       keys: keysView,
@@ -361,7 +407,7 @@ async function usageView(main) {
                   ? `до ${number(u.tokens)} (оценка)`
                   : "Нет данных"
                 : number(u.tokens),
-              u.key_name || "Удалённый ключ",
+              u.api_key_id ? u.key_name || "Удалённый ключ" : "Чат OLM",
               u.account_email || "Аккаунт удалён",
               u.state === "complete" ? "Завершён" : u.state,
               date(u.created),
@@ -407,9 +453,9 @@ async function connectGoogle() {
   const content = el(
     "div",
     {},
-    el("p", {}, "Войдите в Google, затем вернитесь сюда."),
+    el("p", {}, "Подключите Google-аккаунт для доступа к моделям Antigravity."),
   );
-  d = dialog("Подключить Antigravity", content);
+  d = dialog("Войти в Antigravity через Google", content);
   const link = el(
     "a",
     {
@@ -421,7 +467,7 @@ async function connectGoogle() {
   );
   if (flow.mode === "web") {
     content.replaceChildren(
-      el("p", {}, "После входа Google вернёт вас в кабинет."),
+      el("p", {}, "Выберите аккаунт Google и разрешите доступ. Затем вернётесь в OLM."),
       link,
     );
     return;
@@ -450,6 +496,296 @@ async function connectGoogle() {
       "Подключить",
     ),
   );
+}
+function chatMessageNode(container, message) {
+  const article = el("article", { class: `chat-message ${message.role}` });
+  const label = el(
+    "div",
+    { class: "chat-message-label" },
+    message.role === "user" ? "Вы" : message.modelName || "Antigravity",
+  );
+  const bubble = el("div", { class: "chat-bubble" });
+  const details = el("small", { class: "chat-message-details" });
+  article.append(label, bubble, details);
+  container.append(article);
+  const update = () => {
+    bubble.textContent = message.content || (message.pending ? "…" : "");
+    bubble.classList.toggle("failed", Boolean(message.failed));
+    details.classList.toggle("error", Boolean(message.failed));
+    details.textContent = message.failed
+      ? message.failed
+      : message.pending
+        ? "Генерирует ответ"
+        : message.usage &&
+            Number.isSafeInteger(message.usage.prompt_tokens) &&
+            Number.isSafeInteger(message.usage.completion_tokens)
+          ? `Потребление: ${number(message.usage.prompt_tokens + message.usage.completion_tokens)} токенов`
+          : message.role === "assistant"
+            ? "Потребление: нет данных"
+            : "";
+    details.hidden = !details.textContent;
+  };
+  update();
+  return { article, bubble, update };
+}
+async function chatView(main) {
+  const { models } = await api("/api/chat/models");
+  const available = models.filter(
+    (item) => item.remaining === null || item.remaining > 0,
+  );
+  const page = el("section", { class: "chat-page" });
+  const header = el(
+    "div",
+    { class: "chat-header" },
+    el("h1", {}, "Чат"),
+  );
+  if (available.length) {
+    const fresh = button("Новый чат", () => {
+      if (chatAbortController) return;
+      chatMessages = [];
+      renderMessages();
+    });
+    fresh.classList.add("chat-new");
+    fresh.prepend(icon("plus", 16));
+    header.append(fresh);
+  }
+  page.append(header);
+
+  if (!available.length) {
+    page.classList.add("chat-page-empty");
+    const empty = el(
+      "div",
+      { class: "chat-empty panel" },
+      el("span", { class: "chat-empty-icon" }, icon("chat", 22)),
+      el(
+        "p",
+        {},
+        models.length
+          ? "Квота всех доступных моделей исчерпана."
+          : "Подключите Google-аккаунт Antigravity, чтобы открыть модели в чате.",
+      ),
+      models.length
+        ? button("Аккаунты", () => navigate("accounts"))
+        : button("Подключить Google", connectGoogle, "primary"),
+    );
+    page.append(empty);
+    main.replaceChildren(page);
+    return;
+  }
+
+  const keyFor = (item) => `${item.accountId}:${item.id}`;
+  const selected =
+    available.find((item) => keyFor(item) === chatSelection) || available[0];
+  chatSelection = keyFor(selected);
+  const picker = el("select", { id: "chat-model", "aria-label": "Модель" });
+  for (const item of models) {
+    const quota =
+      item.remaining === null
+        ? "квота неизвестна"
+        : `${Math.round(item.remaining * 100)}% квоты`;
+    const option = el(
+      "option",
+      { value: keyFor(item) },
+      `${item.name} · ${item.email} · ${quota}`,
+    );
+    option.disabled = item.remaining !== null && item.remaining <= 0;
+    picker.append(option);
+  }
+  picker.value = chatSelection;
+  picker.addEventListener("change", () => {
+    chatSelection = picker.value;
+  });
+  page.append(
+    el(
+      "label",
+      { class: "chat-model-picker", for: "chat-model" },
+      el("span", {}, "Модель и аккаунт"),
+      picker,
+    ),
+  );
+
+  const messages = el("div", {
+    class: "chat-messages",
+    role: "log",
+    "aria-label": "Сообщения чата",
+    "aria-live": "polite",
+  });
+  const renderMessages = () => {
+    messages.replaceChildren();
+    if (!chatMessages.length) {
+      messages.append(
+        el(
+          "div",
+          { class: "chat-placeholder" },
+          icon("chat", 24),
+          el("p", {}, "Задайте вопрос выбранной модели."),
+        ),
+      );
+      return;
+    }
+    for (const message of chatMessages) chatMessageNode(messages, message);
+    messages.scrollTop = messages.scrollHeight;
+  };
+  renderMessages();
+
+  const input = el("textarea", {
+    id: "chat-input",
+    rows: "1",
+    placeholder: "Напишите сообщение",
+    "aria-label": "Сообщение",
+  });
+  const send = el(
+    "button",
+    { type: "submit", class: "primary chat-send", "aria-label": "Отправить" },
+    icon("send", 18),
+  );
+  const stop = el(
+    "button",
+    {
+      type: "button",
+      class: "chat-stop",
+      "aria-label": "Остановить ответ",
+      hidden: "",
+      onClick: () => chatAbortController?.abort(),
+    },
+    icon("stop", 17),
+  );
+  const composer = el(
+    "form",
+    { class: "chat-composer" },
+    el("label", { class: "sr-only", for: "chat-input" }, "Сообщение"),
+    input,
+    send,
+    stop,
+  );
+  composer.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const content = input.value.trim();
+    const choice = models.find((item) => keyFor(item) === picker.value);
+    if (!content || !choice || chatAbortController) return;
+    const history = chatMessages
+      .filter((item) => !item.pending && !item.failed)
+      .map(({ role, content: text }) => ({ role, content: text }));
+    const userMessage = { role: "user", content };
+    const assistant = {
+      role: "assistant",
+      content: "",
+      modelName: `${choice.name} · ${choice.email}`,
+      pending: true,
+      usage: null,
+      failed: null,
+    };
+    chatMessages.push(userMessage, assistant);
+    messages.querySelector(".chat-placeholder")?.remove();
+    chatMessageNode(messages, userMessage);
+    const assistantNode = chatMessageNode(messages, assistant);
+    messages.scrollTop = messages.scrollHeight;
+    input.value = "";
+    input.style.height = "auto";
+    input.disabled = true;
+    picker.disabled = true;
+    send.disabled = true;
+    stop.hidden = false;
+    header.querySelector("button").disabled = true;
+    const controller = new AbortController();
+    chatAbortController = controller;
+    try {
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-csrf-token": csrf || "",
+        },
+        body: JSON.stringify({
+          model: choice.id,
+          accountId: choice.accountId,
+          messages: [...history, userMessage],
+          max_tokens: 4096,
+        }),
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        const result = await response.json().catch(() => ({}));
+        if (response.status === 401) login();
+        throw new Error(result.error?.message || "Не удалось получить ответ");
+      }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      const consume = (block) => {
+        const payload = block
+          .split(/\r?\n/)
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trimStart())
+          .join("\n");
+        if (!payload || payload === "[DONE]") return;
+        const chunk = JSON.parse(payload);
+        const delta = chunk.choices?.[0]?.delta?.content;
+        if (typeof delta === "string") {
+          assistant.content += delta;
+          assistantNode.update();
+          messages.scrollTop = messages.scrollHeight;
+        }
+        if (chunk.usage) {
+          assistant.usage = chunk.usage;
+          assistantNode.update();
+        }
+      };
+      try {
+        while (true) {
+          const { value, done } = await reader.read();
+          buffer += done
+            ? decoder.decode()
+            : decoder.decode(value, { stream: true });
+          let separator;
+          while ((separator = /\r?\n\r?\n/.exec(buffer))) {
+            consume(buffer.slice(0, separator.index));
+            buffer = buffer.slice(separator.index + separator[0].length);
+          }
+          if (done) {
+            if (buffer.trim()) consume(buffer);
+            break;
+          }
+        }
+      } finally {
+        reader.releaseLock();
+      }
+      if (!assistant.content) assistant.failed = "Модель вернула пустой ответ";
+    } catch (error) {
+      assistant.failed =
+        error.name === "AbortError" ? "Ответ остановлен" : error.message;
+    } finally {
+      assistant.pending = false;
+      assistantNode.update();
+      if (chatAbortController === controller) chatAbortController = null;
+      input.disabled = false;
+      picker.disabled = false;
+      send.disabled = false;
+      stop.hidden = true;
+      header.querySelector("button").disabled = false;
+      input.focus();
+    }
+  });
+  input.addEventListener("input", () => {
+    input.style.height = "auto";
+    input.style.height = `${Math.min(input.scrollHeight, 168)}px`;
+  });
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      if (!send.disabled) composer.requestSubmit();
+    }
+  });
+  page.append(
+    messages,
+    composer,
+    el(
+      "small",
+      { class: "chat-hint" },
+      "Enter отправляет, Shift + Enter переносит строку",
+    ),
+  );
+  main.replaceChildren(page);
 }
 async function accountsView(main) {
   const { accounts } = await api("/api/accounts");
@@ -979,7 +1315,7 @@ refreshMe()
   .then(async () => {
     await shell();
     if (oauthResult) {
-      await navigate("accounts");
+      await navigate(oauthResult === "connected" ? "chat" : "accounts");
       notify(
         {
           connected: "Google-аккаунт подключён",

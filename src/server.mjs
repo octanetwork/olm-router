@@ -324,6 +324,83 @@ export async function createApplication({
               .all(user.id)
               .map((a) => ({ ...store.accountSafe(a), email: a.email })),
           });
+        if (p === "/api/chat/models" && method === "GET") {
+          const models = store.db
+            .prepare(
+              "SELECT id,email,quota FROM accounts WHERE user_id=? AND enabled=1 ORDER BY email",
+            )
+            .all(user.id)
+            .flatMap((account) =>
+              JSON.parse(account.quota || "[]").map((model) => ({
+                id: model.id,
+                name: model.name || model.id,
+                accountId: account.id,
+                email: account.email,
+                remaining:
+                  typeof model.remaining === "number" ? model.remaining : null,
+                resetAt: model.resetAt || null,
+              })),
+            )
+            .filter((model) => typeof model.id === "string" && model.id.length)
+            .sort((a, b) =>
+              `${a.name} ${a.email}`.localeCompare(`${b.name} ${b.email}`),
+            );
+          return json(res, 200, { models });
+        }
+        if (p === "/api/chat" && method === "POST") {
+          limiter.check("chat:" + user.id, 30);
+          requireThat(
+            (concurrent.get(user.id) || 0) < 2,
+            429,
+            "Не больше двух одновременных запросов",
+          );
+          concurrent.set(user.id, (concurrent.get(user.id) || 0) + 1);
+          try {
+            const b = await readJson(req);
+            requireThat(
+              typeof b.accountId === "string" &&
+                b.accountId.length > 0 &&
+                b.accountId.length <= 128 &&
+                typeof b.model === "string" &&
+                b.model.length > 0 &&
+                b.model.length <= 150,
+              400,
+              "Выберите модель и Google-аккаунт",
+            );
+            const account = store.db
+              .prepare(
+                "SELECT * FROM accounts WHERE id=? AND user_id=? AND enabled=1",
+              )
+              .get(b.accountId, user.id);
+            requireThat(account, 403, "Этот Google-аккаунт недоступен");
+            await gateway({
+              store,
+              provider,
+              user,
+              body: {
+                model: b.model,
+                messages: b.messages,
+                max_tokens: 4096,
+                stream: true,
+              },
+              res,
+              signal: AbortSignal.any([
+                controller.signal,
+                AbortSignal.timeout(600000),
+              ]),
+              protocol: "openai",
+              scope: "chat:" + session.hash,
+              assignedAccount: account,
+              sessionChat: true,
+            });
+            return;
+          } finally {
+            concurrent.set(
+              user.id,
+              Math.max(0, (concurrent.get(user.id) || 1) - 1),
+            );
+          }
+        }
         if (p === "/api/accounts/oauth" && method === "POST") {
           limiter.check("oauth:" + user.id, 10, 600000);
           const flow = provider.start(user.id, session.hash);

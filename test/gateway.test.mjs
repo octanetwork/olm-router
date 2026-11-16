@@ -370,6 +370,23 @@ await test("closed routes, csrf and cookie security", async () => {
     await new Promise((r) => secured.close(r));
   }
 });
+await test("chat only exposes and accepts the signed-in user's account models", async () => {
+  const owned = ensureAccount(store.user(user.id), "gemini-test");
+  const foreign = ensureAccount(store.user(other.id), "gemini-test");
+  const models = await request("/api/chat/models");
+  assert.equal(models.status, 200);
+  assert.ok(JSON.parse(models.text).models.every((model) => model.accountId === owned.id));
+
+  const denied = await request("/api/chat", {
+    method: "POST",
+    body: {
+      accountId: foreign.id,
+      model: "gemini-test",
+      messages: [{ role: "user", content: "Hello" }],
+    },
+  });
+  assert.equal(denied.status, 403);
+});
 await test("web OAuth callback keeps strict session and account client binding", async () => {
   const env = Object.fromEntries(
     [

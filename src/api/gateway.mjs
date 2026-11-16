@@ -353,11 +353,16 @@ export async function gateway({
   scope = user.id,
   assignedAccount = null,
   apiKey = null,
+  sessionChat = false,
 }) {
   if (protocol === "openai") body = fromOpenAI(body);
   if (protocol === "responses") body = fromResponses(body);
   validate(body);
-  requireThat(assignedAccount && apiKey, 403, "Запрос не привязан к API-ключу");
+  requireThat(
+    assignedAccount && (apiKey || sessionChat),
+    403,
+    "Запрос не привязан к аккаунту",
+  );
   const quota = JSON.parse(assignedAccount.quota || "[]").find(
     (item) => item.id === body.model,
   );
@@ -375,18 +380,28 @@ export async function gateway({
     )
     .get(assignedAccount.id, body.model, Date.now());
   requireThat(!cooldown, 429, "Модель временно ограничена Google");
-  const assignment = store.db
-    .prepare(
-      "SELECT account_id FROM api_key_models WHERE api_key_id=? AND model=?",
-    )
-    .get(apiKey.id, body.model);
-  requireThat(
-    assignment?.account_id === assignedAccount.id &&
-      assignedAccount.user_id === user.id &&
-      assignedAccount.enabled,
-    403,
-    "Модель и Google-аккаунт не назначены этому API-ключу",
-  );
+  if (apiKey) {
+    const assignment = store.db
+      .prepare(
+        "SELECT account_id FROM api_key_models WHERE api_key_id=? AND model=?",
+      )
+      .get(apiKey.id, body.model);
+    requireThat(
+      assignment?.account_id === assignedAccount.id &&
+        assignedAccount.user_id === user.id &&
+        assignedAccount.enabled,
+      403,
+      "Модель и Google-аккаунт не назначены этому API-ключу",
+    );
+  } else {
+    requireThat(
+      sessionChat &&
+        assignedAccount.user_id === user.id &&
+        assignedAccount.enabled,
+      403,
+      "Этот Google-аккаунт недоступен",
+    );
+  }
   const id = randomUUID(),
     created = Date.now(),
     accounts = [{ ...assignedAccount, source: "own" }];
@@ -420,7 +435,7 @@ export async function gateway({
           .prepare(
             "INSERT INTO usage_details(usage_id,api_key_id,tokens) VALUES(?,?,0) ON CONFLICT(usage_id) DO UPDATE SET api_key_id=excluded.api_key_id",
           )
-          .run(id, apiKey.id);
+          .run(id, apiKey?.id || null);
       });
       const request =
         nativeRequest || provider.convert(body, a.id + ":" + scope);
@@ -884,6 +899,10 @@ export async function gateway({
       const charged = actual ? input + output : keyReserved ? keyReservation : 0;
       store.settleKeyTokens(id, charged, { input, output, state });
       keyReserved = false;
+    } else if (sessionChat) {
+      store.db
+        .prepare("UPDATE usage_details SET tokens=? WHERE usage_id=?")
+        .run(actual ? input + output : 0, id);
     }
     store.db
       .prepare("UPDATE usage SET input=?,output=?,state=? WHERE id=?")
