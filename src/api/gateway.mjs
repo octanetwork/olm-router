@@ -75,6 +75,198 @@ export function fromOpenAI(body) {
             : undefined,
   };
 }
+
+function responseText(content, label) {
+  if (typeof content === "string") return content;
+  requireThat(Array.isArray(content), 400, `Неверный формат ${label}`);
+  return content
+    .map((part) => {
+      requireThat(
+        part && ["input_text", "output_text", "text"].includes(part.type),
+        400,
+        "Responses поддерживает только текстовые сообщения",
+      );
+      requireThat(typeof part.text === "string", 400, "Текстовое содержимое должно быть строкой");
+      return part.text;
+    })
+    .join("");
+}
+
+export function fromResponses(body) {
+  requireThat(
+    body && typeof body === "object" && !Array.isArray(body),
+    400,
+    "Ожидается JSON-объект",
+  );
+  const input =
+    typeof body.input === "string"
+      ? [{ role: "user", content: body.input }]
+      : body.input;
+  requireThat(
+    Array.isArray(input) && input.length > 0 && input.length <= 2000,
+    400,
+    "Responses требует от 1 до 2000 входных элементов",
+  );
+  const messages = [],
+    system = [];
+  if (body.instructions !== undefined) {
+    requireThat(
+      typeof body.instructions === "string",
+      400,
+      "instructions должен быть строкой",
+    );
+    system.push(body.instructions);
+  }
+  for (const item of input) {
+    requireThat(
+      item && typeof item === "object" && !Array.isArray(item),
+      400,
+      "Неверный входной элемент Responses",
+    );
+    if (item.type === "function_call") {
+      const callId = item.call_id || item.id;
+      requireThat(
+        typeof callId === "string" && callId.length > 0 && callId.length <= 256,
+        400,
+        "Укажите call_id function call",
+      );
+      requireThat(
+        typeof item.name === "string" &&
+          /^[a-zA-Z_][a-zA-Z0-9_.-]{0,63}$/.test(item.name),
+        400,
+        "Неверное имя function call",
+      );
+      let args;
+      try {
+        args = JSON.parse(item.arguments || "{}");
+      } catch {
+        throw new Fault(400, "Неверные аргументы function call");
+      }
+      requireThat(
+        args && typeof args === "object" && !Array.isArray(args),
+        400,
+        "Аргументы function call должны быть JSON-объектом",
+      );
+      messages.push({
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: callId,
+            name: item.name,
+            input: args,
+          },
+        ],
+      });
+      continue;
+    }
+    if (item.type === "function_call_output") {
+      requireThat(
+        typeof item.call_id === "string" &&
+          item.call_id.length > 0 &&
+          item.call_id.length <= 256,
+        400,
+        "Укажите call_id результата инструмента",
+      );
+      messages.push({
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: item.call_id,
+            content: responseText(item.output, "результата инструмента"),
+          },
+        ],
+      });
+      continue;
+    }
+    const role = item.role || "user";
+    requireThat(
+      item.type === undefined || item.type === "message",
+      400,
+      "Тип входного элемента Responses не поддерживается",
+    );
+    requireThat(
+      ["user", "assistant", "system", "developer"].includes(role),
+      400,
+      "Неверная роль сообщения Responses",
+    );
+    const text = responseText(item.content, "сообщения");
+    if (role === "system" || role === "developer") system.push(text);
+    else messages.push({ role, content: [{ type: "text", text }] });
+  }
+  requireThat(
+    body.tools === undefined ||
+      (Array.isArray(body.tools) && body.tools.length <= 128),
+    400,
+    "Неверный список function tools",
+  );
+  const tools = body.tools?.map((tool) => {
+    requireThat(tool?.type === "function", 400, "Поддерживаются только function tools");
+    return {
+      name: tool.name,
+      description: tool.description,
+      input_schema: tool.parameters,
+    };
+  });
+  const choice = body.tool_choice;
+  const reasoning = body.reasoning;
+  requireThat(
+    reasoning === undefined ||
+      (reasoning && typeof reasoning === "object" && !Array.isArray(reasoning)),
+    400,
+    "Неверный reasoning Responses",
+  );
+  const effort = reasoning?.effort;
+  const thinkingBudget = {
+    minimal: 1024,
+    low: 2048,
+    medium: 8192,
+    high: 16384,
+    xhigh: 32768,
+  }[effort];
+  requireThat(
+    effort === undefined || thinkingBudget,
+    400,
+    "Неверный reasoning.effort Responses",
+  );
+  requireThat(
+    body.stream === undefined || typeof body.stream === "boolean",
+    400,
+    "stream должен быть boolean",
+  );
+  requireThat(
+    choice === undefined ||
+      ["auto", "none", "required"].includes(choice) ||
+      (choice && choice.type === "function" && typeof choice.name === "string"),
+    400,
+    "Неверный tool_choice Responses",
+  );
+  return {
+    model: body.model,
+    messages,
+    system: system.join("\n"),
+    max_tokens: body.max_output_tokens ?? 8192,
+    temperature: body.temperature,
+    top_p: body.top_p,
+    thinking:
+      thinkingBudget === undefined
+        ? undefined
+        : { type: "enabled", budget_tokens: thinkingBudget },
+    reasoning_effort: effort,
+    stream: body.stream === true,
+    tools,
+    tool_choice:
+      choice === "required"
+        ? { type: "any" }
+        : choice === "none"
+          ? { type: "none" }
+          : choice?.type === "function"
+            ? { type: "tool", name: choice.name }
+            : undefined,
+  };
+}
+
 export function validate(body) {
   requireThat(
     body && typeof body === "object" && !Array.isArray(body),
@@ -107,6 +299,12 @@ export function validate(body) {
         body.temperature <= 2),
     400,
     "Неверная temperature",
+  );
+  requireThat(
+    body.top_p === undefined ||
+      (typeof body.top_p === "number" && body.top_p >= 0 && body.top_p <= 1),
+    400,
+    "Неверный top_p",
   );
   for (const m of body.messages) {
     requireThat(
@@ -143,59 +341,6 @@ export function validate(body) {
     "stream должен быть boolean",
   );
 }
-export const priceCost = (p, input, output) => {
-  const total = Number(
-    (BigInt(input) * BigInt(p.input) +
-      BigInt(output) * BigInt(p.output) +
-      999999n) /
-      1000000n,
-  );
-  requireThat(
-    Number.isSafeInteger(total) && total >= 0,
-    400,
-    "Расход слишком велик",
-  );
-  return total;
-};
-export function candidates(store, user, model) {
-  const settings = JSON.parse(user.settings);
-  let own = store.db
-    .prepare("SELECT * FROM accounts WHERE user_id=? AND enabled=1 ORDER BY id")
-    .all(user.id);
-  if (settings.accountId)
-    own.sort(
-      (a, b) =>
-        Number(b.id === settings.accountId) -
-        Number(a.id === settings.accountId),
-    );
-  if (settings.mode === "stop") own = own.slice(0, 1);
-  let pool = own.map((a) => ({ ...a, source: "own" }));
-  if (own.length === 0 || settings.sharedFallback === true)
-    pool.push(
-      ...store.db
-        .prepare(
-          "SELECT * FROM accounts WHERE shared=1 AND enabled=1 AND user_id!=? ORDER BY id",
-        )
-        .all(user.id)
-        .map((a) => ({ ...a, source: "shared" })),
-    );
-  const unsettled = store.db
-    .prepare(
-      "SELECT r.id FROM reservations r JOIN usage u ON u.id=r.id WHERE u.user_id=? AND u.state='reconcile' LIMIT 1",
-    )
-    .get(user.id);
-  return pool.filter(
-    (a) =>
-      !(a.source === "shared" && unsettled) &&
-      !store.db
-        .prepare(
-          "SELECT 1 FROM cooldowns WHERE account_id=? AND model=? AND until>?",
-        )
-        .get(a.id, model, Date.now()) &&
-      a.quota &&
-      JSON.parse(a.quota).some((m) => m.id === model && m.remaining !== 0),
-  );
-}
 export async function gateway({
   store,
   provider,
@@ -206,72 +351,158 @@ export async function gateway({
   protocol = "anthropic",
   nativeRequest,
   scope = user.id,
+  assignedAccount = null,
+  apiKey = null,
+  sessionChat = false,
 }) {
   if (protocol === "openai") body = fromOpenAI(body);
+  if (protocol === "responses") body = fromResponses(body);
   validate(body);
+  requireThat(
+    assignedAccount && (apiKey || sessionChat),
+    403,
+    "Запрос не привязан к аккаунту",
+  );
+  const quota = JSON.parse(assignedAccount.quota || "[]").find(
+    (item) => item.id === body.model,
+  );
+  requireThat(quota, 409, "Модель больше не доступна в этом Google-аккаунте");
+  requireThat(
+    quota.remaining === null ||
+      quota.remaining === undefined ||
+      Number(quota.remaining) > 0,
+    429,
+    "Квота этой модели в назначенном Google-аккаунте исчерпана",
+  );
+  const cooldown = store.db
+    .prepare(
+      "SELECT until FROM cooldowns WHERE account_id=? AND model=? AND until>?",
+    )
+    .get(assignedAccount.id, body.model, Date.now());
+  requireThat(!cooldown, 429, "Модель временно ограничена Google");
+  if (apiKey) {
+    const assignment = store.db
+      .prepare(
+        "SELECT account_id FROM api_key_models WHERE api_key_id=? AND model=?",
+      )
+      .get(apiKey.id, body.model);
+    requireThat(
+      assignment?.account_id === assignedAccount.id &&
+        assignedAccount.user_id === user.id &&
+        assignedAccount.enabled,
+      403,
+      "Модель и Google-аккаунт не назначены этому API-ключу",
+    );
+  } else {
+    requireThat(
+      sessionChat &&
+        assignedAccount.user_id === user.id &&
+        assignedAccount.enabled,
+      403,
+      "Этот Google-аккаунт недоступен",
+    );
+  }
   const id = randomUUID(),
     created = Date.now(),
-    accounts = candidates(store, user, body.model);
-  requireThat(
-    accounts.length,
-    409,
-    "Нет доступного аккаунта с этой моделью. Проверьте квоту и режим переключения",
-  );
-  let upstream,
+    accounts = [{ ...assignedAccount, source: "own" }];
+  let input = null,
+    output = null,
+    upstream,
     selected,
-    price,
-    reserved = false;
-  const prices = store.db
-    .prepare("SELECT value FROM prices WHERE model=?")
-    .get(body.model);
-  const inputBound =
-    Buffer.byteLength(JSON.stringify(nativeRequest || body), "utf8") + 4096;
+    keyReserved = false,
+    keyReservation = 0;
   for (const a of accounts) {
+    let providerCall = false;
     try {
-      store.db
-        .prepare(
-          "INSERT INTO usage VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET account_id=excluded.account_id,source=excluded.source,state='pending'",
-        )
-        .run(
-          id,
-          user.id,
-          a.id,
-          body.model,
-          a.source,
-          null,
-          null,
-          0,
-          "pending",
-          created,
-        );
-      if (a.source === "shared") {
-        requireThat(prices, 409, "Для модели общего пула ещё не задана цена");
-        price = JSON.parse(prices.value);
-        store.reserve(
-          user.id,
-          priceCost(price, inputBound, body.max_tokens),
-          id,
-        );
-        reserved = true;
-      }
+      store.transaction(() => {
+        store.db
+          .prepare(
+            "INSERT INTO usage VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET account_id=excluded.account_id,source=excluded.source,state='pending'",
+          )
+          .run(
+            id,
+            user.id,
+            a.id,
+            body.model,
+            a.source,
+            null,
+            null,
+            0,
+            "pending",
+            created,
+          );
+        store.db
+          .prepare(
+            "INSERT INTO usage_details(usage_id,api_key_id,tokens) VALUES(?,?,0) ON CONFLICT(usage_id) DO UPDATE SET api_key_id=excluded.api_key_id",
+          )
+          .run(id, apiKey?.id || null);
+      });
       const request =
         nativeRequest || provider.convert(body, a.id + ":" + scope);
+      if (apiKey?.token_limit !== null && apiKey?.token_limit !== undefined) {
+        providerCall = true;
+        const count = await provider.countTokens(
+          a,
+          body.model,
+          request,
+          signal,
+        );
+        providerCall = false;
+        input = count.totalTokens;
+        const activeReservations = store.db
+          .prepare(
+            "SELECT coalesce(sum(amount),0) AS n FROM token_reservations WHERE api_key_id=?",
+          )
+          .get(apiKey.id).n;
+        const keyState = store.db
+          .prepare(
+            "SELECT token_limit,tokens_used FROM api_key_policies WHERE api_key_id=?",
+          )
+          .get(apiKey.id);
+        requireThat(keyState, 401, "API-ключ отозван");
+        const available =
+          keyState.token_limit - keyState.tokens_used - activeReservations;
+        requireThat(
+          available > input,
+          429,
+          "Лимита API-ключа не хватает даже на входные токены запроса",
+        );
+        body.max_tokens = Math.min(body.max_tokens, available - input);
+        request.generationConfig ||= {};
+        request.generationConfig.maxOutputTokens = body.max_tokens;
+        keyReservation = input + body.max_tokens;
+        store.reserveKeyTokens(apiKey, keyReservation, id);
+        keyReserved = true;
+        store.db
+          .prepare("UPDATE usage SET input=? WHERE id=?")
+          .run(input, id);
+      }
+      providerCall = true;
       upstream = await provider.generate(a, body.model, request, signal);
+      providerCall = false;
       selected = a;
       break;
     } catch (e) {
       if (e.dispatched && !e.rejected) {
+        if (keyReserved) {
+          store.settleKeyTokens(id, keyReservation, {
+            input,
+            output: null,
+            state: "usage_unknown",
+          });
+          keyReserved = false;
+        }
         store.db
           .prepare("UPDATE usage SET state=? WHERE id=?")
-          .run(reserved ? "reconcile" : "failed", id);
+          .run("usage_unknown", id);
         throw e;
       }
       store.db.prepare("UPDATE usage SET state='failed' WHERE id=?").run(id);
-      if (reserved) {
-        store.settle(id, 0);
-        reserved = false;
+      if (keyReserved) {
+        store.releaseKeyTokens(id);
+        keyReserved = false;
       }
-      if (e.status === 429) {
+      if (providerCall && e.status === 429) {
         store.db
           .prepare(
             "INSERT INTO cooldowns VALUES(?,?,?) ON CONFLICT(account_id,model) DO UPDATE SET until=excluded.until",
@@ -285,8 +516,6 @@ export async function gateway({
   const content = [],
     toolCalls = [];
   let text = "",
-    input = null,
-    output = null,
     nativeUsage = null,
     finishReason = "STOP",
     nativeParts = [],
@@ -295,6 +524,13 @@ export async function gateway({
     current = null,
     toolIndex = 0;
   const stream = body.stream === true;
+  const responseId = "resp_" + id.replaceAll("-", "");
+  const responseCreated = Math.floor(created / 1000);
+  const responseOutput = [];
+  let responseSequence = 0,
+    responseTextItem = null,
+    responseTextIndex = -1,
+    responseMessageCount = 0;
   let ended = false;
   async function write(data, event) {
     if (res.destroyed) throw new Fault(499, "Соединение закрыто");
@@ -304,6 +540,104 @@ export async function gateway({
       )
     )
       await once(res, "drain", { signal });
+  }
+  const responseUsage = () => ({
+    input_tokens: input ?? 0,
+    output_tokens: output ?? 0,
+    total_tokens: input !== null && output !== null ? input + output : 0,
+  });
+  const responseObject = (status, completedAt = null) => ({
+    id: responseId,
+    object: "response",
+    created_at: responseCreated,
+    status,
+    completed_at: completedAt,
+    error: null,
+    incomplete_details:
+      status === "incomplete" ? { reason: "max_output_tokens" } : null,
+    model: body.model,
+    output: responseOutput,
+    usage: input === null || output === null ? null : responseUsage(),
+    instructions: body.system || null,
+    max_output_tokens: body.max_tokens,
+    parallel_tool_calls: true,
+    previous_response_id: null,
+    reasoning: { effort: body.reasoning_effort || null, summary: null },
+    store: false,
+    temperature: body.temperature ?? 0.7,
+    text: { format: { type: "text" } },
+    tool_choice:
+      body.tool_choice?.type === "any"
+        ? "required"
+        : body.tool_choice?.type === "none"
+          ? "none"
+          : body.tool_choice?.type === "tool"
+            ? { type: "function", name: body.tool_choice.name }
+            : "auto",
+    tools: (body.tools || []).map((tool) => ({
+      type: "function",
+      name: tool.name,
+      description: tool.description || "",
+      parameters: tool.input_schema,
+    })),
+    top_p: body.top_p ?? 1,
+    truncation: "disabled",
+    user: null,
+    metadata: {},
+  });
+  const responseEvent = async (type, fields = {}) =>
+    write(
+      { type, ...fields, sequence_number: ++responseSequence },
+      type,
+    );
+  async function startResponseText() {
+    if (responseTextItem) return;
+    responseTextIndex = responseOutput.length;
+    responseTextItem = {
+      id: "msg_" + id.replaceAll("-", "") + "_" + responseMessageCount++,
+      type: "message",
+      status: "in_progress",
+      role: "assistant",
+      content: [{ type: "output_text", text: "", annotations: [] }],
+    };
+    responseOutput.push(responseTextItem);
+    if (stream && protocol === "responses") {
+      await responseEvent("response.output_item.added", {
+        output_index: responseTextIndex,
+        item: { ...responseTextItem, content: [] },
+      });
+      await responseEvent("response.content_part.added", {
+        item_id: responseTextItem.id,
+        output_index: responseTextIndex,
+        content_index: 0,
+        part: { type: "output_text", text: "", annotations: [] },
+      });
+    }
+  }
+  async function finishResponseText() {
+    if (!responseTextItem) return;
+    responseTextItem.status = "completed";
+    if (stream && protocol === "responses") {
+      const textValue = responseTextItem.content[0].text;
+      await responseEvent("response.output_text.done", {
+        item_id: responseTextItem.id,
+        output_index: responseTextIndex,
+        content_index: 0,
+        text: textValue,
+      });
+      await responseEvent("response.content_part.done", {
+        item_id: responseTextItem.id,
+        output_index: responseTextIndex,
+        content_index: 0,
+        part: { type: "output_text", text: textValue, annotations: [] },
+      });
+      await responseEvent("response.output_item.done", {
+        output_index: responseTextIndex,
+        item: responseTextItem,
+      });
+    }
+    responseTextItem = null;
+    responseTextIndex = -1;
   }
   async function closeBlock() {
     if (current && protocol === "anthropic" && stream)
@@ -361,6 +695,14 @@ export async function gateway({
         );
       if (protocol === "openai")
         await write(chunk({ role: "assistant", content: "" }));
+      if (protocol === "responses") {
+        await responseEvent("response.created", {
+          response: responseObject("in_progress"),
+        });
+        await responseEvent("response.in_progress", {
+          response: responseObject("in_progress"),
+        });
+      }
     }
     for await (const raw of events(upstream.body)) {
       if (raw.error) throw new Fault(502, "Провайдер прервал ответ");
@@ -419,6 +761,18 @@ export async function gateway({
             text += part.text;
             if (current !== "text") content.push({ type: "text", text: "" });
             content.at(-1).text += part.text;
+            if (protocol === "responses") {
+              await startResponseText();
+              responseTextItem.content[0].text += part.text;
+              if (stream)
+                await responseEvent("response.output_text.delta", {
+                  item_id: responseTextItem.id,
+                  output_index: responseTextIndex,
+                  content_index: 0,
+                  delta: part.text,
+                  logprobs: [],
+                });
+            }
             await openBlock("text");
             if (stream && protocol === "anthropic")
               await write(
@@ -435,6 +789,7 @@ export async function gateway({
         }
         if (part.functionCall) {
           hasContent = true;
+          if (protocol === "responses") await finishResponseText();
           await closeBlock();
           index++;
           const f = part.functionCall,
@@ -451,6 +806,38 @@ export async function gateway({
             type: "function",
             function: { name: f.name, arguments: JSON.stringify(f.args || {}) },
           });
+          if (protocol === "responses") {
+            const outputIndex = responseOutput.length;
+            const item = {
+              id: "fc_" + toolId,
+              type: "function_call",
+              status: "completed",
+              call_id: toolId,
+              name: f.name,
+              arguments: JSON.stringify(f.args || {}),
+            };
+            responseOutput.push(item);
+            if (stream) {
+              await responseEvent("response.output_item.added", {
+                output_index: outputIndex,
+                item: { ...item, status: "in_progress", arguments: "" },
+              });
+              await responseEvent("response.function_call_arguments.delta", {
+                item_id: item.id,
+                output_index: outputIndex,
+                delta: item.arguments,
+              });
+              await responseEvent("response.function_call_arguments.done", {
+                item_id: item.id,
+                output_index: outputIndex,
+                arguments: item.arguments,
+              });
+              await responseEvent("response.output_item.done", {
+                output_index: outputIndex,
+                item,
+              });
+            }
+          }
           if (part.thoughtSignature) {
             requireThat(
               part.thoughtSignature.length <= 16384,
@@ -507,25 +894,19 @@ export async function gateway({
     }
     requireThat(hasContent, 502, "Провайдер вернул пустой ответ");
     const actual = input !== null && output !== null;
-    let cost = 0;
-    if (reserved && actual) {
-      cost = priceCost(price, input, output);
-      const reservation = store.db
-        .prepare("SELECT amount FROM reservations WHERE id=?")
-        .get(id);
-      if (reservation && cost <= reservation.amount) {
-        store.settle(id, cost, { input, output, state: "complete" });
-        reserved = false;
-      } else cost = 0;
+    const state = actual ? "complete" : "usage_unknown";
+    if (apiKey) {
+      const charged = actual ? input + output : keyReserved ? keyReservation : 0;
+      store.settleKeyTokens(id, charged, { input, output, state });
+      keyReserved = false;
+    } else if (sessionChat) {
+      store.db
+        .prepare("UPDATE usage_details SET tokens=? WHERE usage_id=?")
+        .run(actual ? input + output : 0, id);
     }
-    const state = reserved
-      ? "reconcile"
-      : actual
-        ? "complete"
-        : "usage_unknown";
     store.db
-      .prepare("UPDATE usage SET input=?,output=?,credits=?,state=? WHERE id=?")
-      .run(input, output, cost, state, id);
+      .prepare("UPDATE usage SET input=?,output=?,state=? WHERE id=?")
+      .run(input, output, state, id);
     const usage = { input_tokens: input, output_tokens: output };
     if (stream) {
       await closeBlock();
@@ -620,6 +1001,17 @@ export async function gateway({
             },
           }),
         );
+      if (protocol === "responses") {
+        await finishResponseText();
+        res.end(
+          JSON.stringify(
+            responseObject(
+              finishReason === "MAX_TOKENS" ? "incomplete" : "completed",
+              Math.floor(Date.now() / 1000),
+            ),
+          ),
+        );
+      }
       if (protocol === "gemini")
         res.write(
           JSON.stringify({
@@ -630,12 +1022,32 @@ export async function gateway({
           }),
         );
     }
-    res.end();
+    if (stream && protocol === "responses") {
+      await finishResponseText();
+      const status = finishReason === "MAX_TOKENS" ? "incomplete" : "completed";
+      await responseEvent(status === "completed" ? "response.completed" : "response.incomplete", {
+        response: responseObject(status, Math.floor(Date.now() / 1000)),
+      });
+    }
+    if (!res.writableEnded) res.end();
     ended = true;
   } catch (e) {
+    if (keyReserved) {
+      store.settleKeyTokens(id, keyReservation, {
+        input,
+        output: null,
+        state: "usage_unknown",
+      });
+      keyReserved = false;
+    }
     store.db
       .prepare("UPDATE usage SET input=?,output=?,state=? WHERE id=?")
-      .run(input, output, reserved ? "reconcile" : "failed", id);
+      .run(
+        input,
+        output,
+        "usage_unknown",
+        id,
+      );
     if (res.headersSent && !res.destroyed) {
       if (protocol === "anthropic")
         await write(
@@ -645,6 +1057,8 @@ export async function gateway({
           },
           "error",
         );
+      else if (protocol === "responses")
+        await responseEvent("error", { message: "Ответ провайдера прерван" });
       else await write({ error: { message: "Ответ провайдера прерван" } });
       res.end();
     } else throw e;

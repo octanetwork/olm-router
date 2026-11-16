@@ -1,16 +1,48 @@
 const root = document.querySelector("#app");
 let me,
   csrf,
-  view = "usage",
+  view = "chat",
   month = new Date(),
-  noticeTimer;
-const credit = (n) =>
-  new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 6 }).format(
-    (n || 0) / 1e6,
-  );
+  noticeTimer,
+  chatMessages = [],
+  chatSelection = "",
+  chatAbortController = null;
 const number = (n) =>
   n === null ? "Нет данных" : new Intl.NumberFormat("ru-RU").format(n || 0);
 const date = (n) => new Date(n).toLocaleString("ru-RU");
+const iconPaths = {
+  chat: '<path d="M21 15a4 4 0 0 1-4 4H7l-4 2V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/>',
+  usage:
+    '<path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/>',
+  accounts:
+    '<path d="M2 20a7 7 0 0 1 14 0"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6"/><path d="M22 11h-6"/>',
+  key: '<path d="M2.6 17.4a2 2 0 0 0 2.8 0l6.4-6.4a6 6 0 1 0-2.8-2.8l-6.4 6.4a2 2 0 0 0 0 2.8Z"/><path d="m14 6 1 1"/>',
+  clients:
+    '<path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v4a6 6 0 0 1-12 0V8z"/>',
+  settings:
+    '<path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z"/><path d="m19.4 15 .1.1 1.4 1.1-1.4 2.4-1.7-.6a8 8 0 0 1-1.8 1l-.3 1.8h-2.8l-.3-1.8a8 8 0 0 1-1.8-1l-1.7.6-1.4-2.4 1.4-1.1a8 8 0 0 1 0-2l-1.4-1.1 1.4-2.4 1.7.6a8 8 0 0 1 1.8-1l.3-1.8h2.8l.3 1.8a8 8 0 0 1 1.8 1l1.7-.6 1.4 2.4-1.4 1.1a8 8 0 0 1-.1 2Z"/>',
+  users:
+    '<path d="M16 21a7 7 0 0 0-14 0"/><circle cx="9" cy="7" r="4"/><path d="M22 21a7 7 0 0 0-5-6.7"/><path d="M16 3.3a4 4 0 0 1 0 7.4"/>',
+  logout:
+    '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/>',
+  plus: '<path d="M12 5v14"/><path d="M5 12h14"/>',
+  send: '<path d="m5 12 7-7 7 7"/><path d="M12 19V5"/>',
+  stop: '<rect width="14" height="14" x="5" y="5" rx="2"/>',
+};
+function icon(name, size = 18) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("width", String(size));
+  svg.setAttribute("height", String(size));
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "1.8");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("stroke-linejoin", "round");
+  svg.setAttribute("aria-hidden", "true");
+  svg.innerHTML = iconPaths[name] || "";
+  return svg;
+}
 function el(tag, props = {}, ...children) {
   const n = document.createElement(tag);
   for (const [k, v] of Object.entries(props)) {
@@ -123,6 +155,10 @@ async function copy(text) {
   notify("Скопировано");
 }
 function login() {
+  chatAbortController?.abort();
+  chatAbortController = null;
+  chatMessages = [];
+  chatSelection = "";
   me = null;
   root.replaceChildren(
     el(
@@ -159,30 +195,35 @@ async function refreshMe() {
   const d = await api("/api/me");
   me = d.user;
   csrf = d.csrf;
-  me.reserved = d.reserved;
+  me.tokenReserved = d.tokenReserved;
   me.configured = d.providerConfigured;
 }
 async function logout() {
+  chatAbortController?.abort();
+  chatMessages = [];
   await api("/api/logout", "POST", {});
   login();
 }
 async function shell() {
   await refreshMe();
   const navs = [
-    ["usage", "Потребление"],
-    ["accounts", "Аккаунты"],
-    ["keys", "API-ключи"],
-    ["clients", "Подключение"],
-    ["settings", "Настройки"],
+    ["chat", "Чат", "chat"],
+    ["usage", "Потребление", "usage"],
+    ["accounts", "Аккаунты", "accounts"],
+    ["keys", "API-ключи", "key"],
+    ["clients", "Подключение", "clients"],
+    ["settings", "Настройки", "settings"],
   ];
-  if (me.role !== "user") navs.push(["users", "Пользователи"]);
-  if (me.role === "superadmin") navs.push(["prices", "Цены и сверка"]);
+  if (me.role !== "user") navs.push(["users", "Пользователи", "users"]);
   const nav = el(
     "nav",
     { "aria-label": "Навигация" },
-    navs.map(([id, label]) =>
-      button(label, () => navigate(id), view === id ? "active" : ""),
-    ),
+    navs.map(([id, label, glyph]) => {
+      const item = button("", () => navigate(id), view === id ? "active" : "");
+      item.dataset.view = id;
+      item.append(icon(glyph), el("span", {}, label));
+      return item;
+    }),
   );
   const main = el("main", { id: "main" });
   root.replaceChildren(
@@ -199,7 +240,11 @@ async function shell() {
           { class: "profile" },
           el("strong", {}, me.login),
           el("span", { class: "role" }, me.role),
-          button("Выйти", logout),
+          (() => {
+            const out = button("Выйти", logout);
+            out.prepend(icon("logout", 16));
+            return out;
+          })(),
         ),
       ),
       main,
@@ -208,32 +253,26 @@ async function shell() {
   await navigate(view);
 }
 async function navigate(next) {
+  if (view === "chat" && next !== "chat") chatAbortController?.abort();
   view = next;
-  for (const b of document.querySelectorAll("nav button"))
-    b.classList.toggle(
-      "active",
-      b.textContent ===
-        {
-          usage: "Потребление",
-          accounts: "Аккаунты",
-          keys: "API-ключи",
-          clients: "Подключение",
-          settings: "Настройки",
-          users: "Пользователи",
-          prices: "Цены и сверка",
-        }[view],
-    );
   const main = document.querySelector("main");
+  for (const b of document.querySelectorAll("nav button")) {
+    const active = b.dataset.view === view;
+    b.classList.toggle("active", active);
+    if (active) b.setAttribute("aria-current", "page");
+    else b.removeAttribute("aria-current");
+  }
+  main.classList.toggle("chat-main", view === "chat");
   main.replaceChildren(el("div", { class: "skeleton" }, "Загрузка…"));
   try {
     await {
+      chat: chatView,
       usage: usageView,
       accounts: accountsView,
       keys: keysView,
       clients: clientsView,
       settings: settingsView,
       users: usersView,
-      prices: pricesView,
     }[view](main);
   } catch (e) {
     main.replaceChildren(
@@ -253,10 +292,10 @@ async function usageView(main) {
     (a, d) => ({
       input: a.input + d.input,
       output: a.output + d.output,
-      credits: a.credits + d.credits,
+      tokens: a.tokens + d.tokens,
       requests: a.requests + d.requests,
     }),
-    { input: 0, output: 0, credits: 0, requests: 0 },
+    { input: 0, output: 0, tokens: 0, requests: 0 },
   );
   const grid = el("div", { class: "calendar" });
   for (const d of ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"])
@@ -284,7 +323,7 @@ async function usageView(main) {
           b.classList.remove("selected");
         b.classList.add("selected");
         detail.textContent = d
-          ? `${day} ${month.toLocaleDateString("ru-RU", { month: "long" })}: ${number(d.input)} входных, ${number(d.output)} выходных токенов · ${credit(d.credits)} credits${d.unknown ? " · Есть запросы без точного usage" : ""}`
+          ? `${day} ${month.toLocaleDateString("ru-RU", { month: "long" })}: ${number(d.input)} входных, ${number(d.output)} выходных, всего ${number(d.tokens)} токенов${d.unknown ? " · Есть запросы без точного usage" : ""}`
           : `${day}: запросов нет`;
       },
       "day" + (d?.requests ? " used" : "") + (d?.requests > 20 ? " busy" : ""),
@@ -304,30 +343,30 @@ async function usageView(main) {
       el(
         "div",
         {},
-        el("small", {}, "Баланс"),
-        el("strong", {}, credit(me.balance)),
-        el("small", {}, "credits"),
-      ),
-      el(
-        "div",
-        {},
         el("small", {}, "За месяц"),
-        el("strong", {}, number(totals.input + totals.output)),
-        el("small", {}, "токенов"),
+        el("strong", {}, number(totals.tokens)),
+        el("small", {}, "токенов за месяц"),
       ),
       el(
         "div",
         {},
-        el("small", {}, "Списано"),
-        el("strong", {}, credit(totals.credits)),
-        el("small", {}, "credits"),
+        el("small", {}, "Входные"),
+        el("strong", {}, number(totals.input)),
+        el("small", {}, "токены"),
+      ),
+      el(
+        "div",
+        {},
+        el("small", {}, "Выходные"),
+        el("strong", {}, number(totals.output)),
+        el("small", {}, "токены"),
       ),
     ),
-    me.reserved
+    me.tokenReserved
       ? el(
           "p",
           { class: "note" },
-          `В резерве ${credit(me.reserved)} credits. Запросы без итогового usage проверяет superadmin.`,
+          `Для активных запросов зарезервировано до ${number(me.tokenReserved)} токенов. Неопределённое потребление учитывается по верхней границе запроса.`,
         )
       : null,
     el(
@@ -360,12 +399,17 @@ async function usageView(main) {
       el("h2", {}, "Последние запросы"),
       data.recent.length
         ? table(
-            ["Модель", "Токены", "Источник", "Credits", "Время"],
+            ["Модель", "Токены", "API-ключ", "Аккаунт", "Статус", "Время"],
             data.recent.map((u) => [
               u.model,
-              u.input === null ? "Нет данных" : number(u.input + u.output),
-              u.source === "own" ? "Свой аккаунт" : "Общий пул",
-              credit(u.credits) + (u.state === "reconcile" ? " · сверка" : ""),
+              u.state === "usage_unknown"
+                ? u.tokens
+                  ? `до ${number(u.tokens)} (оценка)`
+                  : "Нет данных"
+                : number(u.tokens),
+              u.api_key_id ? u.key_name || "Удалённый ключ" : "Чат OLM",
+              u.account_email || "Аккаунт удалён",
+              u.state === "complete" ? "Завершён" : u.state,
               date(u.created),
             ]),
           )
@@ -404,14 +448,14 @@ function table(head, rows) {
   );
 }
 async function connectGoogle() {
+  const flow = await api("/api/accounts/oauth", "POST", {});
   let d;
   const content = el(
     "div",
     {},
-    el("p", {}, "Войдите в Google, затем вернитесь сюда."),
+    el("p", {}, "Подключите Google-аккаунт для доступа к моделям Antigravity."),
   );
-  d = dialog("Подключить Antigravity", content);
-  const flow = await api("/api/accounts/oauth", "POST", {});
+  d = dialog("Войти в Antigravity через Google", content);
   const link = el(
     "a",
     {
@@ -423,7 +467,7 @@ async function connectGoogle() {
   );
   if (flow.mode === "web") {
     content.replaceChildren(
-      el("p", {}, "После входа Google вернёт вас в кабинет."),
+      el("p", {}, "Выберите аккаунт Google и разрешите доступ. Затем вернётесь в OLM."),
       link,
     );
     return;
@@ -453,6 +497,296 @@ async function connectGoogle() {
     ),
   );
 }
+function chatMessageNode(container, message) {
+  const article = el("article", { class: `chat-message ${message.role}` });
+  const label = el(
+    "div",
+    { class: "chat-message-label" },
+    message.role === "user" ? "Вы" : message.modelName || "Antigravity",
+  );
+  const bubble = el("div", { class: "chat-bubble" });
+  const details = el("small", { class: "chat-message-details" });
+  article.append(label, bubble, details);
+  container.append(article);
+  const update = () => {
+    bubble.textContent = message.content || (message.pending ? "…" : "");
+    bubble.classList.toggle("failed", Boolean(message.failed));
+    details.classList.toggle("error", Boolean(message.failed));
+    details.textContent = message.failed
+      ? message.failed
+      : message.pending
+        ? "Генерирует ответ"
+        : message.usage &&
+            Number.isSafeInteger(message.usage.prompt_tokens) &&
+            Number.isSafeInteger(message.usage.completion_tokens)
+          ? `Потребление: ${number(message.usage.prompt_tokens + message.usage.completion_tokens)} токенов`
+          : message.role === "assistant"
+            ? "Потребление: нет данных"
+            : "";
+    details.hidden = !details.textContent;
+  };
+  update();
+  return { article, bubble, update };
+}
+async function chatView(main) {
+  const { models } = await api("/api/chat/models");
+  const available = models.filter(
+    (item) => item.remaining === null || item.remaining > 0,
+  );
+  const page = el("section", { class: "chat-page" });
+  const header = el(
+    "div",
+    { class: "chat-header" },
+    el("h1", {}, "Чат"),
+  );
+  if (available.length) {
+    const fresh = button("Новый чат", () => {
+      if (chatAbortController) return;
+      chatMessages = [];
+      renderMessages();
+    });
+    fresh.classList.add("chat-new");
+    fresh.prepend(icon("plus", 16));
+    header.append(fresh);
+  }
+  page.append(header);
+
+  if (!available.length) {
+    page.classList.add("chat-page-empty");
+    const empty = el(
+      "div",
+      { class: "chat-empty panel" },
+      el("span", { class: "chat-empty-icon" }, icon("chat", 22)),
+      el(
+        "p",
+        {},
+        models.length
+          ? "Квота всех доступных моделей исчерпана."
+          : "Подключите Google-аккаунт Antigravity, чтобы открыть модели в чате.",
+      ),
+      models.length
+        ? button("Аккаунты", () => navigate("accounts"))
+        : button("Подключить Google", connectGoogle, "primary"),
+    );
+    page.append(empty);
+    main.replaceChildren(page);
+    return;
+  }
+
+  const keyFor = (item) => `${item.accountId}:${item.id}`;
+  const selected =
+    available.find((item) => keyFor(item) === chatSelection) || available[0];
+  chatSelection = keyFor(selected);
+  const picker = el("select", { id: "chat-model", "aria-label": "Модель" });
+  for (const item of models) {
+    const quota =
+      item.remaining === null
+        ? "квота неизвестна"
+        : `${Math.round(item.remaining * 100)}% квоты`;
+    const option = el(
+      "option",
+      { value: keyFor(item) },
+      `${item.name} · ${item.email} · ${quota}`,
+    );
+    option.disabled = item.remaining !== null && item.remaining <= 0;
+    picker.append(option);
+  }
+  picker.value = chatSelection;
+  picker.addEventListener("change", () => {
+    chatSelection = picker.value;
+  });
+  page.append(
+    el(
+      "label",
+      { class: "chat-model-picker", for: "chat-model" },
+      el("span", {}, "Модель и аккаунт"),
+      picker,
+    ),
+  );
+
+  const messages = el("div", {
+    class: "chat-messages",
+    role: "log",
+    "aria-label": "Сообщения чата",
+    "aria-live": "polite",
+  });
+  const renderMessages = () => {
+    messages.replaceChildren();
+    if (!chatMessages.length) {
+      messages.append(
+        el(
+          "div",
+          { class: "chat-placeholder" },
+          icon("chat", 24),
+          el("p", {}, "Задайте вопрос выбранной модели."),
+        ),
+      );
+      return;
+    }
+    for (const message of chatMessages) chatMessageNode(messages, message);
+    messages.scrollTop = messages.scrollHeight;
+  };
+  renderMessages();
+
+  const input = el("textarea", {
+    id: "chat-input",
+    rows: "1",
+    placeholder: "Напишите сообщение",
+    "aria-label": "Сообщение",
+  });
+  const send = el(
+    "button",
+    { type: "submit", class: "primary chat-send", "aria-label": "Отправить" },
+    icon("send", 18),
+  );
+  const stop = el(
+    "button",
+    {
+      type: "button",
+      class: "chat-stop",
+      "aria-label": "Остановить ответ",
+      hidden: "",
+      onClick: () => chatAbortController?.abort(),
+    },
+    icon("stop", 17),
+  );
+  const composer = el(
+    "form",
+    { class: "chat-composer" },
+    el("label", { class: "sr-only", for: "chat-input" }, "Сообщение"),
+    input,
+    send,
+    stop,
+  );
+  composer.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const content = input.value.trim();
+    const choice = models.find((item) => keyFor(item) === picker.value);
+    if (!content || !choice || chatAbortController) return;
+    const history = chatMessages
+      .filter((item) => !item.pending && !item.failed)
+      .map(({ role, content: text }) => ({ role, content: text }));
+    const userMessage = { role: "user", content };
+    const assistant = {
+      role: "assistant",
+      content: "",
+      modelName: `${choice.name} · ${choice.email}`,
+      pending: true,
+      usage: null,
+      failed: null,
+    };
+    chatMessages.push(userMessage, assistant);
+    messages.querySelector(".chat-placeholder")?.remove();
+    chatMessageNode(messages, userMessage);
+    const assistantNode = chatMessageNode(messages, assistant);
+    messages.scrollTop = messages.scrollHeight;
+    input.value = "";
+    input.style.height = "auto";
+    input.disabled = true;
+    picker.disabled = true;
+    send.disabled = true;
+    stop.hidden = false;
+    header.querySelector("button").disabled = true;
+    const controller = new AbortController();
+    chatAbortController = controller;
+    try {
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-csrf-token": csrf || "",
+        },
+        body: JSON.stringify({
+          model: choice.id,
+          accountId: choice.accountId,
+          messages: [...history, userMessage],
+          max_tokens: 4096,
+        }),
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        const result = await response.json().catch(() => ({}));
+        if (response.status === 401) login();
+        throw new Error(result.error?.message || "Не удалось получить ответ");
+      }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      const consume = (block) => {
+        const payload = block
+          .split(/\r?\n/)
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trimStart())
+          .join("\n");
+        if (!payload || payload === "[DONE]") return;
+        const chunk = JSON.parse(payload);
+        const delta = chunk.choices?.[0]?.delta?.content;
+        if (typeof delta === "string") {
+          assistant.content += delta;
+          assistantNode.update();
+          messages.scrollTop = messages.scrollHeight;
+        }
+        if (chunk.usage) {
+          assistant.usage = chunk.usage;
+          assistantNode.update();
+        }
+      };
+      try {
+        while (true) {
+          const { value, done } = await reader.read();
+          buffer += done
+            ? decoder.decode()
+            : decoder.decode(value, { stream: true });
+          let separator;
+          while ((separator = /\r?\n\r?\n/.exec(buffer))) {
+            consume(buffer.slice(0, separator.index));
+            buffer = buffer.slice(separator.index + separator[0].length);
+          }
+          if (done) {
+            if (buffer.trim()) consume(buffer);
+            break;
+          }
+        }
+      } finally {
+        reader.releaseLock();
+      }
+      if (!assistant.content) assistant.failed = "Модель вернула пустой ответ";
+    } catch (error) {
+      assistant.failed =
+        error.name === "AbortError" ? "Ответ остановлен" : error.message;
+    } finally {
+      assistant.pending = false;
+      assistantNode.update();
+      if (chatAbortController === controller) chatAbortController = null;
+      input.disabled = false;
+      picker.disabled = false;
+      send.disabled = false;
+      stop.hidden = true;
+      header.querySelector("button").disabled = false;
+      input.focus();
+    }
+  });
+  input.addEventListener("input", () => {
+    input.style.height = "auto";
+    input.style.height = `${Math.min(input.scrollHeight, 168)}px`;
+  });
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      if (!send.disabled) composer.requestSubmit();
+    }
+  });
+  page.append(
+    messages,
+    composer,
+    el(
+      "small",
+      { class: "chat-hint" },
+      "Enter отправляет, Shift + Enter переносит строку",
+    ),
+  );
+  main.replaceChildren(page);
+}
 async function accountsView(main) {
   const { accounts } = await api("/api/accounts");
   const list = el("section", { class: "panel" });
@@ -461,11 +795,10 @@ async function accountsView(main) {
       el(
         "div",
         { class: "empty" },
-        "Подключите свой аккаунт. Credits за его использование не списываются.",
+        "Подключите Google-аккаунт, чтобы привязать его модели к API-ключу.",
       ),
     );
   for (const a of accounts) {
-    const active = me.settings.accountId === a.id;
     const quotas = el("div", { class: "quota" });
     for (const q of a.quota || []) {
       const meter = el("meter", {
@@ -499,29 +832,12 @@ async function accountsView(main) {
       "div",
       { class: "actions" },
       a.enabled
-        ? button(active ? "Выбран" : "Выбрать", async () => {
-            await api("/api/settings", "PATCH", {
-              ...me.settings,
-              accountId: a.id,
-            });
-            await refreshMe();
-            await navigate("accounts");
-          })
-        : null,
-      a.enabled
         ? button("Обновить", async () => {
             await api(`/api/accounts/${a.id}/refresh`, "POST", {});
             await navigate("accounts");
           })
         : null,
     );
-    if (me.role !== "user" && a.enabled)
-      actions.append(
-        button(a.shared ? "Убрать из пула" : "В общий пул", async () => {
-          await api("/api/accounts/" + a.id, "PATCH", { shared: !a.shared });
-          await navigate("accounts");
-        }),
-      );
     if (a.enabled)
       actions.append(
         button(
@@ -550,15 +866,17 @@ async function accountsView(main) {
               el(
                 "span",
                 { class: "tag" },
-                !a.enabled ? "Отключён" : a.shared ? "Общий пул" : "Приватный",
+                !a.enabled ? "Отключён" : "Подключён",
               ),
             ),
             el(
               "small",
               {},
-              a.checked
+              a.enabled && a.checked
                 ? "Проверено " + date(a.checked)
-                : "Квоты ещё не получены",
+                : a.enabled
+                  ? "Квоты ещё не получены"
+                  : "Подключение отключено",
             ),
           ),
           actions,
@@ -575,97 +893,123 @@ async function accountsView(main) {
       button("Подключить Google", connectGoogle, "primary"),
     ),
     list,
+  );
+}
+function modelAccountSelect(accounts) {
+  const options = accounts.flatMap((account) =>
+    (account.quota || []).map((model) =>
+      el(
+        "option",
+        { value: JSON.stringify([account.id, model.id]) },
+        `${model.name || model.id} — ${account.email}`,
+      ),
+    ),
+  );
+  return el("select", { "data-assignment": "" }, options);
+}
+function assignmentEditor(accounts) {
+  const rows = el("div", { class: "assignment-editor" });
+  const add = () => rows.insertBefore(modelAccountSelect(accounts), control);
+  const control = button("Добавить модель", add);
+  rows.append(control);
+  if (accounts.some((account) => (account.quota || []).length))
+    add();
+  return rows;
+}
+async function issueKeyDialog(target = null) {
+  const { accounts } = target
+    ? await api(`/api/admin/users/${target.id}/accounts`)
+    : await api("/api/accounts");
+  const available = accounts.some((account) => (account.quota || []).length);
+  if (!available) {
+    notify("Сначала подключите аккаунт и обновите его список моделей");
+    return;
+  }
+  const assignments = assignmentEditor(accounts);
+  let d;
+  d = dialog(
+    target ? `Выдать ключ: ${target.login}` : "Новый API-ключ",
     form(
       [
+        field("Название", "name"),
+        target
+          ? field("Лимит токенов на весь срок ключа", "tokenLimit", "number", {
+              min: 1,
+              step: 1,
+              inputmode: "numeric",
+            })
+          : el(
+              "p",
+              { class: "note" },
+              "Ключ использует только выбранные модели и аккаунты. Внутреннего лимита нет, действуют квоты Google.",
+            ),
         el(
-          "label",
-          {},
-          "Когда квота закончится",
+          "fieldset",
+          { class: "assignment-fields" },
+          el("legend", {}, "Модель → аккаунт"),
+          assignments,
           el(
-            "select",
-            { name: "mode" },
-            el(
-              "option",
-              {
-                value: "stop",
-                selected: me.settings.mode === "stop" ? "" : undefined,
-              },
-              "Остановить (Deadswitch)",
-            ),
-            el(
-              "option",
-              {
-                value: "auto",
-                selected: me.settings.mode === "auto" ? "" : undefined,
-              },
-              "Переключить на мой следующий аккаунт",
-            ),
+            "small",
+            {},
+            "Каждая модель этого ключа всегда использует указанный аккаунт. Переключения на другие аккаунты нет.",
           ),
-        ),
-        el(
-          "label",
-          { class: "checkbox" },
-          el("input", {
-            type: "checkbox",
-            name: "sharedFallback",
-            checked: me.settings.sharedFallback,
-          }),
-          "Разрешить общий пул со списанием credits",
         ),
       ],
       async (b) => {
-        await api("/api/settings", "PATCH", {
-          ...me.settings,
-          mode: b.mode,
-          sharedFallback: b.sharedFallback === "on",
+        const selected = [...assignments.querySelectorAll("select")].map(
+          (select) => {
+            const [accountId, model] = JSON.parse(select.value);
+            return { accountId, model };
+          },
+        );
+        const path = target
+          ? `/api/admin/users/${target.id}/keys`
+          : "/api/keys";
+        const key = await api(path, "POST", {
+          name: b.name,
+          assignments: selected,
+          ...(target ? { tokenLimit: Number(b.tokenLimit) } : {}),
         });
-        await refreshMe();
-        notify("Настройки сохранены");
+        d.close();
+        await navigate(target ? "users" : "keys");
+        dialog(
+          "Сохраните API-ключ",
+          el(
+            "div",
+            {},
+            el("p", {}, "Полностью ключ показывается только один раз."),
+            el("pre", { class: "code-key" }, key.key),
+            button("Скопировать", () => copy(key.key)),
+          ),
+        );
       },
-      "Сохранить",
-      "narrow",
+      "Создать ключ",
     ),
   );
 }
 async function keysView(main) {
   const { keys } = await api("/api/keys");
+  const accountData = await api("/api/accounts");
+  const canCreate = accountData.accounts.some((account) => (account.quota || []).length);
   main.replaceChildren(
     el(
       "div",
       { class: "topline" },
       el("h1", {}, "API-ключи"),
-      button(
-        "Создать ключ",
-        () => {
-          const d = dialog(
-            "Новый API-ключ",
-            form(
-              [field("Название", "name")],
-              async (b) => {
-                const k = await api("/api/keys", "POST", b);
-                d.close();
-                await navigate("keys");
-                dialog(
-                  "Сохраните ключ",
-                  el(
-                    "div",
-                    {},
-                    el("p", {}, "Полностью он показывается только сейчас."),
-                    el("pre", { class: "code-key" }, k.key),
-                    button("Скопировать", () => copy(k.key)),
-                  ),
-                );
-              },
-              "Создать",
-            ),
-          );
-        },
-        "primary",
-      ),
+      canCreate
+        ? button("Создать ключ", () => issueKeyDialog(), "primary")
+        : null,
     ),
     el(
       "section",
       { class: "panel" },
+      !canCreate
+        ? el(
+            "p",
+            { class: "note" },
+            "Подключите аккаунт и обновите модели в разделе «Аккаунты», прежде чем создавать ключ.",
+          )
+        : null,
       keys.length
         ? keys.map((k) =>
             el(
@@ -677,6 +1021,31 @@ async function keysView(main) {
                 el("strong", {}, k.name),
                 el("div", { class: "muted" }, k.prefix + "…"),
                 el("small", {}, date(k.created)),
+                  el(
+                    "div",
+                    { class: "key-assignments" },
+                    k.assignments.map((assignment) =>
+                      el(
+                        "div",
+                        {},
+                        `${assignment.model} → ${assignment.email}${assignment.enabled ? "" : " · аккаунт отключён"}`,
+                      ),
+                    ),
+                  ),
+                  el(
+                    "small",
+                    {},
+                    k.tokenLimit === null
+                      ? `${number(k.tokensUsed)} токенов использовано · лимит Google`
+                      : `${number(k.tokensUsed)} из ${number(k.tokenLimit)} токенов использовано`,
+                  ),
+                  k.tokensReserved
+                    ? el(
+                        "small",
+                        {},
+                        `Зарезервировано: ${number(k.tokensReserved)} токенов`,
+                      )
+                    : null,
               ),
               button(
                 "Отозвать",
@@ -697,9 +1066,8 @@ async function keysView(main) {
   );
 }
 async function clientsView(main) {
-  const { accounts } = await api("/api/accounts");
-  const model =
-    accounts.flatMap((a) => a.quota || [])[0]?.id || "MODEL_FROM_V1_MODELS";
+  const { keys } = await api("/api/keys");
+  const model = keys.flatMap((key) => key.assignments)[0]?.model || "MODEL_FROM_V1_MODELS";
   const tabs = el("div", { class: "client-tabs" }),
     code = el("pre"),
     desc = el("p", { class: "muted" });
@@ -710,7 +1078,22 @@ async function clientsView(main) {
     },
     OpenAI: {
       text: `curl https://api-olm.octx.space/v1/chat/completions \\\n  -H "Authorization: Bearer YOUR_OLM_KEY" \\\n  -H "Content-Type: application/json" \\\n  -d '{"model":"${model}","messages":[{"role":"user","content":"Привет"}],"max_tokens":1024,"stream":false}'`,
-      note: "Для совместимого клиента: base URL https://api-olm.octx.space/v1. Поддерживаются Chat Completions, streaming и инструменты. Responses пока недоступен.",
+      note: "Chat Completions. Для Codex CLI ниже настроен Responses API с текстом, streaming и function tools.",
+    },
+    "Codex CLI": {
+      text: `# ~/.codex/config.toml
+model_provider = "olm"
+model = "${model}"
+
+[model_providers.olm]
+name = "OLM Router"
+base_url = "https://api-olm.octx.space/v1"
+env_key = "OLM_API_KEY"
+wire_api = "responses"
+
+# В терминале задайте ключ:
+export OLM_API_KEY="YOUR_OLM_KEY"`,
+      note: "Вставьте настройки в ~/.codex/config.toml и задайте OLM_API_KEY. Поддерживаются Responses, текст, function tools и streaming.",
     },
     "Gemini API": {
       text: `curl 'https://api-olm.octx.space/v1beta/models/${model}:generateContent' \\\n  -H "x-goog-api-key: YOUR_OLM_KEY" \\\n  -H "Content-Type: application/json" \\\n  -d '{"contents":[{"role":"user","parts":[{"text":"Привет"}]}],"generationConfig":{"maxOutputTokens":1024}}'`,
@@ -723,9 +1106,16 @@ export GOOGLE_GENAI_API_VERSION="v1beta"
 gemini --model "${model}"`,
       note: "В /auth выберите API key. Проверено с Gemini CLI 0.61.0. Вход Google OAuth и Vertex billing у клиента используют другие маршруты.",
     },
+    "AGY CLI": {
+      text: `export OLM_API_KEY="YOUR_OLM_KEY"
+# Необязательно для api-olm.octx.space:
+export OLM_API_BASE_URL="https://api-olm.octx.space"
+agy --model "${model}"`,
+      note: "AGY CLI отправляет запросы и function tools через ваш OLM API-ключ. Удалите OLM_API_KEY, чтобы вернуться к собственному Google OAuth.",
+    },
     "Другие клиенты": {
       text: `curl https://api-olm.octx.space/v1/models \\\n  -H "Authorization: Bearer YOUR_OLM_KEY"`,
-      note: "Claude Desktop и Antigravity IDE требуют отдельной проверки версии и способа входа. Их Google/Anthropic OAuth нельзя заменить адресом этого API. Пока не заявлены как совместимые.",
+      note: "Claude Desktop и Antigravity IDE требуют отдельной проверки версии и способа подключения.",
     },
   };
   const select = (name) => {
@@ -835,41 +1225,77 @@ async function usersView(main) {
       "section",
       { class: "panel" },
       table(
-        ["Логин", "Роль", "Credits", "Доступ", ""],
+        ["Логин", "Роль", "API-ключи", "Всего токенов", "Доступ", ""],
         users.map((u) => [
           u.login,
           u.role,
-          credit(u.balance),
+          number(u.keyCount),
+          u.reservedTokens
+            ? `${number(u.tokenUsage)} (+${number(u.reservedTokens)} в работе)`
+            : number(u.tokenUsage),
           u.enabled ? "Открыт" : "Закрыт",
           u.id === me.id
             ? ""
             : el(
                 "div",
                 { class: "actions" },
-                button("Выдать credits", () => {
-                  let d;
-                  d = dialog(
-                    "Credits: " + u.login,
-                    form(
-                      [
-                        field("Количество credits", "amount", "number", {
-                          min: 0.000001,
-                          step: 0.000001,
-                        }),
-                        field("Причина", "reason"),
-                      ],
-                      async (b) => {
-                        await api(`/api/admin/users/${u.id}/credits`, "POST", {
-                          amount: Math.round(Number(b.amount) * 1e6),
-                          reason: b.reason,
-                        });
-                        d.close();
-                        await navigate("users");
-                      },
-                      "Выдать",
-                    ),
+                button("Ключи", async () => {
+                  let keyDialog;
+                  const { keys } = await api(`/api/admin/users/${u.id}/keys`);
+                  keyDialog = dialog(
+                    `API-ключи: ${u.login}`,
+                    keys.length
+                      ? el(
+                          "div",
+                          {},
+                          keys.map((key) =>
+                            el(
+                              "article",
+                              { class: "list-item" },
+                              el(
+                                "div",
+                                { class: "row wrap" },
+                                el(
+                                  "div",
+                                  {},
+                                  el("strong", {}, key.name),
+                                  el(
+                                    "div",
+                                    { class: "muted" },
+                                    `${key.prefix}… · ${number(key.tokensUsed)} из ${key.tokenLimit === null ? "∞" : number(key.tokenLimit)} токенов${key.tokensReserved ? ` · ${number(key.tokensReserved)} в работе` : ""}`,
+                                  ),
+                                  key.assignments.map((assignment) =>
+                                    el(
+                                      "small",
+                                      {},
+                                      `${assignment.model} → ${assignment.email}${assignment.enabled ? "" : " · отключён"}`,
+                                    ),
+                                  ),
+                                ),
+                                button(
+                                  "Отозвать",
+                                  async () => {
+                                    await api(
+                                      `/api/admin/users/${u.id}/keys/${key.id}`,
+                                      "DELETE",
+                                      {},
+                                    );
+                                    notify("Ключ отозван");
+                                    keyDialog.close();
+                                    await navigate("users");
+                                  },
+                                  "danger",
+                                ),
+                              ),
+                            ),
+                          ),
+                        )
+                      : el("p", { class: "empty" }, "Ключей пока нет"),
                   );
                 }),
+                u.enabled
+                  ? button("Выдать ключ", () => issueKeyDialog(u), "primary")
+                  : null,
                 button(u.enabled ? "Отключить" : "Включить", async () => {
                   await api("/api/admin/users/" + u.id, "PATCH", {
                     enabled: !u.enabled,
@@ -882,97 +1308,6 @@ async function usersView(main) {
     ),
   );
 }
-async function pricesView(main) {
-  const [{ prices }, { reservations }] = await Promise.all([
-    api("/api/admin/prices"),
-    api("/api/admin/reconcile"),
-  ]);
-  main.replaceChildren(
-    el("h1", {}, "Цены и сверка"),
-    el(
-      "section",
-      { class: "panel" },
-      el("h2", {}, "Credits за миллион токенов"),
-      prices.length
-        ? table(
-            ["Модель", "Вход", "Выход"],
-            prices.map((p) => [p.model, credit(p.input), credit(p.output)]),
-          )
-        : el(
-            "p",
-            { class: "empty" },
-            "Без цены модель недоступна в общем пуле.",
-          ),
-      form(
-        [
-          field("Модель", "model"),
-          field("Input credits / 1M", "input", "number", {
-            min: 0.000001,
-            step: 0.000001,
-          }),
-          field("Output credits / 1M", "output", "number", {
-            min: 0.000001,
-            step: 0.000001,
-          }),
-        ],
-        async (b) => {
-          await api("/api/admin/prices", "POST", {
-            model: b.model,
-            input: Math.round(Number(b.input) * 1e6),
-            output: Math.round(Number(b.output) * 1e6),
-          });
-          await navigate("prices");
-        },
-        "Сохранить",
-        "inline-form",
-      ),
-    ),
-    el(
-      "section",
-      { class: "panel" },
-      el("h2", {}, "Запросы на сверку"),
-      reservations.length
-        ? reservations.map((r) =>
-            el(
-              "div",
-              { class: "list-item row" },
-              el(
-                "div",
-                {},
-                el("strong", {}, r.login),
-                el("div", {}, credit(r.amount) + " credits в резерве"),
-                el("small", {}, date(r.created)),
-              ),
-              button("Сверить", () => {
-                let d;
-                d = dialog(
-                  "Итоговое списание",
-                  form(
-                    [
-                      field("Credits", "cost", "number", {
-                        min: 0,
-                        max: r.amount / 1e6,
-                        step: 0.000001,
-                      }),
-                    ],
-                    async (b) => {
-                      await api("/api/admin/reconcile", "POST", {
-                        id: r.id,
-                        cost: Math.round(Number(b.cost) * 1e6),
-                      });
-                      d.close();
-                      await navigate("prices");
-                    },
-                    "Подтвердить",
-                  ),
-                );
-              }),
-            ),
-          )
-        : el("p", { class: "empty" }, "Сверка не требуется."),
-    ),
-  );
-}
 const oauthResult = new URLSearchParams(location.search).get("oauth");
 if (["connected", "warning", "cancelled", "failed"].includes(oauthResult))
   history.replaceState(null, "", location.pathname);
@@ -980,7 +1315,7 @@ refreshMe()
   .then(async () => {
     await shell();
     if (oauthResult) {
-      await navigate("accounts");
+      await navigate(oauthResult === "connected" ? "chat" : "accounts");
       notify(
         {
           connected: "Google-аккаунт подключён",

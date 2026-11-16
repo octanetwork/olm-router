@@ -275,6 +275,11 @@ export class Antigravity {
       503,
       "OAuth web-клиент Google настроен не полностью",
     );
+    requireThat(
+      process.env.NODE_ENV !== "production" || this.webConfigured(),
+      503,
+      "Вход Google через сайт не настроен. Проверьте web OAuth client в production.",
+    );
     const mode = this.webConfigured() ? "web" : "loopback";
     const client = this.oauthClient(mode === "web" ? "web" : "desktop");
     const redirect = mode === "web" ? this.webRedirect : this.desktopRedirect;
@@ -521,6 +526,7 @@ export class Antigravity {
       maxOutputTokens: body.max_tokens,
       temperature: body.temperature ?? 0.7,
     };
+    if (body.top_p !== undefined) generationConfig.topP = body.top_p;
     if (body.thinking?.type === "enabled")
       generationConfig.thinkingConfig = {
         includeThoughts: true,
@@ -608,11 +614,21 @@ export class Antigravity {
     }
     return r;
   }
-  async countTokens(account, model, contents, signal) {
+  async countTokens(account, model, request, signal) {
+    const { contents, systemInstruction, tools } = Array.isArray(request)
+      ? { contents: request }
+      : request;
     const r = await this.call(
       account,
       "countTokens",
-      { request: { model: "models/" + model, contents } },
+      {
+        request: {
+          model: "models/" + model,
+          contents,
+          ...(systemInstruction ? { systemInstruction } : {}),
+          ...(tools ? { tools } : {}),
+        },
+      },
       signal,
     );
     requireThat(r.ok, 502, "Провайдер не смог посчитать токены");

@@ -35,6 +35,7 @@ export class Store {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(path.join(dir, "olm.sqlite"));
     fs.chmodSync(path.join(dir, "olm.sqlite"), 0o600);
+    // Keep legacy billing fields in place for existing databases; inference no longer uses them.
     this.db
       .exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY, login TEXT UNIQUE NOT NULL, password TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('user','admin','superadmin')), manager TEXT REFERENCES users(id), enabled INTEGER NOT NULL DEFAULT 1, balance INTEGER NOT NULL DEFAULT 0 CHECK(balance>=0), settings TEXT NOT NULL DEFAULT '{"mode":"stop","accountId":null,"sharedFallback":false}');
@@ -49,6 +50,86 @@ export class Store {
       CREATE TABLE IF NOT EXISTS cooldowns(account_id TEXT NOT NULL, model TEXT NOT NULL, until INTEGER NOT NULL, PRIMARY KEY(account_id,model));
       CREATE TABLE IF NOT EXISTS prices(model TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS usage_user_date ON usage(user_id,created);`);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS api_key_policies(
+        api_key_id TEXT PRIMARY KEY REFERENCES api_keys(id) ON DELETE CASCADE,
+        token_limit INTEGER,
+        tokens_used INTEGER NOT NULL DEFAULT 0,
+        issued_by TEXT,
+        model_policy_migrated INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE IF NOT EXISTS api_key_models(
+        api_key_id TEXT NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE,
+        model TEXT NOT NULL,
+        account_id TEXT NOT NULL REFERENCES accounts(id),
+        PRIMARY KEY(api_key_id,model)
+      );
+      CREATE TABLE IF NOT EXISTS usage_details(
+        usage_id TEXT PRIMARY KEY REFERENCES usage(id) ON DELETE CASCADE,
+        api_key_id TEXT REFERENCES api_keys(id) ON DELETE SET NULL,
+        tokens INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE IF NOT EXISTS token_reservations(
+        id TEXT PRIMARY KEY,
+        api_key_id TEXT NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE,
+        amount INTEGER NOT NULL,
+        created INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS usage_key_index ON usage_details(api_key_id,usage_id);
+    `);
+    this.db
+      .prepare(
+        "INSERT OR IGNORE INTO api_key_policies(api_key_id) SELECT id FROM api_keys",
+      )
+      .run();
+    this.db
+      .prepare(
+        "INSERT OR IGNORE INTO usage_details(usage_id,tokens) SELECT id,coalesce(input,0)+coalesce(output,0) FROM usage",
+      )
+      .run();
+    this.migrateLegacyKeyModels();
+  }
+  migrateLegacyKeyModels() {
+    const keys = this.db
+      .prepare(
+        "SELECT k.id,k.user_id,u.settings FROM api_keys k JOIN users u ON u.id=k.user_id JOIN api_key_policies p ON p.api_key_id=k.id WHERE p.model_policy_migrated=0",
+      )
+      .all();
+    const insert = this.db.prepare(
+      "INSERT OR IGNORE INTO api_key_models(api_key_id,model,account_id) VALUES(?,?,?)",
+    );
+    for (const key of keys) {
+      if (
+        !this.db
+          .prepare("SELECT 1 FROM api_key_models WHERE api_key_id=? LIMIT 1")
+          .get(key.id)
+      ) {
+        const settings = JSON.parse(key.settings || "{}");
+        const accounts = this.db
+          .prepare(
+            "SELECT id,quota FROM accounts WHERE user_id=? AND enabled=1 ORDER BY id",
+          )
+          .all(key.user_id);
+        accounts.sort(
+          (a, b) =>
+            Number(b.id === settings.accountId) -
+            Number(a.id === settings.accountId),
+        );
+        const assigned = new Set();
+        for (const account of accounts) {
+          for (const model of JSON.parse(account.quota || "[]")) {
+            if (!model?.id || assigned.has(model.id)) continue;
+            insert.run(key.id, model.id, account.id);
+            assigned.add(model.id);
+          }
+        }
+      }
+      this.db
+        .prepare(
+          "UPDATE api_key_policies SET model_policy_migrated=1 WHERE api_key_id=?",
+        )
+        .run(key.id);
+    }
   }
   transaction(fn) {
     this.db.exec("BEGIN IMMEDIATE");
@@ -115,8 +196,8 @@ export class Store {
       .get(id);
   }
   publicUser(user) {
-    const { password, ...safe } = user;
-    return { ...safe, settings: JSON.parse(safe.settings) };
+    const { password, balance, settings, ...safe } = user;
+    return safe;
   }
   canManage(actor, target) {
     return (
@@ -218,18 +299,55 @@ export class Store {
   apiKey(token) {
     if (!token) return null;
     const k = this.db
-      .prepare("SELECT * FROM api_keys WHERE hash=?")
+      .prepare(
+        "SELECT k.*,p.token_limit,p.tokens_used,p.issued_by FROM api_keys k JOIN api_key_policies p ON p.api_key_id=k.id WHERE k.hash=?",
+      )
       .get(digest(token));
     if (!k) return null;
     const user = this.user(k.user_id);
     return user ? { ...k, user } : null;
   }
-  createKey(user, name) {
+  createKey(user, { name, assignments, tokenLimit = null, issuedBy = user.id }) {
+    requireThat(this.user(user.id), 403, "Учётная запись отключена");
     requireThat(
       typeof name === "string" && name.trim().length > 0 && name.length <= 80,
       400,
       "Укажите название ключа",
     );
+    requireThat(
+      Array.isArray(assignments) && assignments.length > 0 && assignments.length <= 100,
+      400,
+      "Добавьте хотя бы одну пару «модель → аккаунт»",
+    );
+    requireThat(
+      tokenLimit === null ||
+        (Number.isSafeInteger(tokenLimit) && tokenLimit > 0 && tokenLimit <= 1e12),
+      400,
+      "Лимит токенов должен быть положительным целым числом",
+    );
+    const seen = new Set();
+    for (const item of assignments) {
+      requireThat(
+        item &&
+          typeof item.model === "string" &&
+          item.model.length > 0 &&
+          item.model.length <= 150 &&
+          typeof item.accountId === "string" &&
+          !seen.has(item.model),
+        400,
+        "Проверьте выбранные модели и аккаунты",
+      );
+      const account = this.db
+        .prepare("SELECT * FROM accounts WHERE id=? AND user_id=? AND enabled=1")
+        .get(item.accountId, user.id);
+      requireThat(account, 400, "Выбранный аккаунт недоступен этому пользователю");
+      requireThat(
+        JSON.parse(account.quota || "[]").some((model) => model.id === item.model),
+        400,
+        "Выбранная модель отсутствует в квотах аккаунта",
+      );
+      seen.add(item.model);
+    }
     requireThat(
       this.db
         .prepare("SELECT count(*) AS n FROM api_keys WHERE user_id=?")
@@ -239,95 +357,108 @@ export class Store {
     );
     const key = "olm_live_" + secret();
     const id = secret();
-    this.db
-      .prepare("INSERT INTO api_keys VALUES(?,?,?,?,?,?)")
-      .run(id, digest(key), user.id, name, key.slice(0, 17), Date.now());
-    this.audit(user.id, "key.create", id);
-    return { id, key, name };
-  }
-  transfer(actor, targetId, amount, reason) {
-    requireThat(
-      Number.isSafeInteger(amount) && amount > 0 && amount <= 1e12,
-      400,
-      "Неверное количество credits",
-    );
-    requireThat(
-      typeof reason === "string" &&
-        reason.trim().length > 0 &&
-        reason.length <= 200,
-      400,
-      "Укажите причину",
-    );
     this.transaction(() => {
-      const target = this.user(targetId);
-      requireThat(
-        target && this.canManage(actor, target) && target.id !== actor.id,
-        403,
-        "Нет доступа к пользователю",
-      );
-      requireThat(
-        target.balance <= 1e15 - amount,
-        400,
-        "Превышен предел баланса",
-      );
-      if (actor.role !== "superadmin") {
-        const n = this.db
-          .prepare(
-            "UPDATE users SET balance=balance-? WHERE id=? AND balance>=?",
-          )
-          .run(amount, actor.id, amount);
-        requireThat(n.changes === 1, 402, "Недостаточно credits в бюджете");
-        this.ledger(actor.id, actor.id, -amount, reason);
-      }
       this.db
-        .prepare("UPDATE users SET balance=balance+? WHERE id=?")
-        .run(amount, targetId);
-      this.ledger(targetId, actor.id, amount, reason);
-      this.audit(actor.id, "credits.transfer", targetId);
-    });
-  }
-  ledger(userId, actor, amount, reason) {
-    this.db
-      .prepare("INSERT INTO ledger VALUES(?,?,?,?,?,?)")
-      .run(secret(), userId, actor, amount, reason, Date.now());
-  }
-  reserve(userId, amount, id) {
-    this.transaction(() => {
-      const r = this.db
         .prepare(
-          "UPDATE users SET balance=balance-? WHERE id=? AND enabled=1 AND balance>=?",
+          "INSERT INTO api_keys VALUES(?,?,?,?,?,?)",
         )
-        .run(amount, userId, amount);
-      requireThat(r.changes === 1, 402, "Недостаточно credits");
+        .run(
+          id,
+          digest(key),
+          user.id,
+          name.trim(),
+          key.slice(0, 17),
+          Date.now(),
+        );
       this.db
-        .prepare("INSERT INTO reservations VALUES(?,?,?,?)")
-        .run(id, userId, amount, Date.now());
+        .prepare(
+          "INSERT INTO api_key_policies(api_key_id,token_limit,tokens_used,issued_by,model_policy_migrated) VALUES(?,?,0,?,1)",
+        )
+        .run(id, tokenLimit, issuedBy);
+      const insert = this.db.prepare(
+        "INSERT INTO api_key_models(api_key_id,model,account_id) VALUES(?,?,?)",
+      );
+      for (const item of assignments)
+        insert.run(id, item.model, item.accountId);
     });
+    this.audit(user.id, "key.create", id);
+    if (issuedBy !== user.id) this.audit(issuedBy, "key.issue", id);
+    return { id, key, name: name.trim(), tokenLimit, assignments };
   }
-  settle(id, cost, usage) {
+  keyModels(id) {
+    return this.db
+      .prepare(
+        "SELECT m.model,m.account_id AS accountId,a.email,a.enabled,a.quota FROM api_key_models m JOIN accounts a ON a.id=m.account_id WHERE m.api_key_id=? ORDER BY m.model",
+      )
+      .all(id)
+      .map((item) => ({
+        model: item.model,
+        accountId: item.accountId,
+        email: item.email,
+        enabled: Boolean(item.enabled),
+        models: JSON.parse(item.quota || "[]").map((model) => model.id),
+      }));
+  }
+  reserveKeyTokens(apiKey, amount, id) {
+    requireThat(
+      Number.isSafeInteger(amount) && amount > 0,
+      400,
+      "Не удалось оценить объём запроса",
+    );
     this.transaction(() => {
-      const r = this.db
-        .prepare("SELECT * FROM reservations WHERE id=?")
-        .get(id);
-      if (!r) return;
+      const current = this.db
+        .prepare(
+          "SELECT p.token_limit,p.tokens_used,coalesce(sum(r.amount),0) AS reserved FROM api_key_policies p LEFT JOIN token_reservations r ON r.api_key_id=p.api_key_id WHERE p.api_key_id=? GROUP BY p.api_key_id",
+        )
+        .get(apiKey.id);
+      requireThat(current, 401, "API-ключ отозван");
       requireThat(
-        Number.isSafeInteger(cost) && cost >= 0 && cost <= r.amount,
-        500,
-        "Расход превысил резерв",
+        current.token_limit === null ||
+          current.tokens_used + current.reserved + amount <= current.token_limit,
+        429,
+        "Запрос превышает остаток лимита токенов этого API-ключа",
       );
       this.db
-        .prepare("UPDATE users SET balance=balance+? WHERE id=?")
-        .run(r.amount - cost, r.user_id);
-      if (cost) this.ledger(r.user_id, null, -cost, "inference:" + id);
-      if (usage) {
+        .prepare("INSERT INTO token_reservations VALUES(?,?,?,?)")
+        .run(id, apiKey.id, amount, Date.now());
+    });
+  }
+  settleKeyTokens(id, tokens, { input = null, output = null, state = "complete" } = {}) {
+    requireThat(
+      Number.isSafeInteger(tokens) && tokens >= 0,
+      500,
+      "Некорректное количество токенов",
+    );
+    this.transaction(() => {
+      const row = this.db
+        .prepare("SELECT api_key_id FROM token_reservations WHERE id=?")
+        .get(id);
+      const apiKeyId =
+        row?.api_key_id ||
+        this.db
+          .prepare("SELECT api_key_id FROM usage_details WHERE usage_id=?")
+          .get(id)
+          ?.api_key_id;
+      if (apiKeyId) {
         this.db
           .prepare(
-            "UPDATE usage SET input=?,output=?,credits=?,state=? WHERE id=?",
+            "UPDATE api_key_policies SET tokens_used=tokens_used+? WHERE api_key_id=?",
           )
-          .run(usage.input, usage.output, cost, usage.state, id);
+          .run(tokens, apiKeyId);
       }
-      this.db.prepare("DELETE FROM reservations WHERE id=?").run(id);
+      this.db
+        .prepare(
+          "UPDATE usage SET input=?,output=?,state=? WHERE id=?",
+        )
+        .run(input, output, state, id);
+      this.db
+        .prepare("UPDATE usage_details SET tokens=? WHERE usage_id=?")
+        .run(tokens, id);
+      this.db.prepare("DELETE FROM token_reservations WHERE id=?").run(id);
     });
+  }
+  releaseKeyTokens(id) {
+    this.db.prepare("DELETE FROM token_reservations WHERE id=?").run(id);
   }
   accountSafe(a) {
     const [name, domain] = a.email.split("@");
@@ -335,7 +466,7 @@ export class Store {
     return {
       ...rest,
       email: `**${name.slice(-4)}@${domain}`,
-      quota: a.quota ? JSON.parse(a.quota) : null,
+      quota: a.enabled && a.quota ? JSON.parse(a.quota) : null,
     };
   }
   accountCredentials(a) {
