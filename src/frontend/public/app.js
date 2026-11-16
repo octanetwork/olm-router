@@ -402,6 +402,7 @@ function table(head, rows) {
   );
 }
 async function connectGoogle() {
+  const flow = await api("/api/accounts/oauth", "POST", {});
   let d;
   const content = el(
     "div",
@@ -409,7 +410,6 @@ async function connectGoogle() {
     el("p", {}, "Войдите в Google, затем вернитесь сюда."),
   );
   d = dialog("Подключить Antigravity", content);
-  const flow = await api("/api/accounts/oauth", "POST", {});
   const link = el(
     "a",
     {
@@ -742,7 +742,22 @@ async function clientsView(main) {
     },
     OpenAI: {
       text: `curl https://api-olm.octx.space/v1/chat/completions \\\n  -H "Authorization: Bearer YOUR_OLM_KEY" \\\n  -H "Content-Type: application/json" \\\n  -d '{"model":"${model}","messages":[{"role":"user","content":"Привет"}],"max_tokens":1024,"stream":false}'`,
-      note: "Для совместимого клиента: base URL https://api-olm.octx.space/v1. Поддерживаются Chat Completions, streaming и инструменты. Responses пока недоступен.",
+      note: "Chat Completions. Для Codex CLI ниже настроен Responses API с текстом, streaming и function tools.",
+    },
+    "Codex CLI": {
+      text: `# ~/.codex/config.toml
+model_provider = "olm"
+model = "${model}"
+
+[model_providers.olm]
+name = "OLM Router"
+base_url = "https://api-olm.octx.space/v1"
+env_key = "OLM_API_KEY"
+wire_api = "responses"
+
+# В терминале задайте ключ:
+export OLM_API_KEY="YOUR_OLM_KEY"`,
+      note: "Вставьте настройки в ~/.codex/config.toml и задайте OLM_API_KEY. Поддерживаются Responses, текст, function tools и streaming.",
     },
     "Gemini API": {
       text: `curl 'https://api-olm.octx.space/v1beta/models/${model}:generateContent' \\\n  -H "x-goog-api-key: YOUR_OLM_KEY" \\\n  -H "Content-Type: application/json" \\\n  -d '{"contents":[{"role":"user","parts":[{"text":"Привет"}]}],"generationConfig":{"maxOutputTokens":1024}}'`,
@@ -755,9 +770,16 @@ export GOOGLE_GENAI_API_VERSION="v1beta"
 gemini --model "${model}"`,
       note: "В /auth выберите API key. Проверено с Gemini CLI 0.61.0. Вход Google OAuth и Vertex billing у клиента используют другие маршруты.",
     },
+    "AGY CLI": {
+      text: `export OLM_API_KEY="YOUR_OLM_KEY"
+# Необязательно для api-olm.octx.space:
+export OLM_API_BASE_URL="https://api-olm.octx.space"
+agy --model "${model}"`,
+      note: "AGY CLI отправляет запросы и function tools через ваш OLM API-ключ. Удалите OLM_API_KEY, чтобы вернуться к собственному Google OAuth.",
+    },
     "Другие клиенты": {
       text: `curl https://api-olm.octx.space/v1/models \\\n  -H "Authorization: Bearer YOUR_OLM_KEY"`,
-      note: "Claude Desktop и Antigravity IDE требуют отдельной проверки версии и способа входа. Их Google/Anthropic OAuth нельзя заменить адресом этого API. Пока не заявлены как совместимые.",
+      note: "Claude Desktop и Antigravity IDE требуют отдельной проверки версии и способа подключения.",
     },
   };
   const select = (name) => {

@@ -68,7 +68,24 @@ curl https://api-olm.octx.space/v1/chat/completions \
   -d '{"model":"MODEL_FROM_V1_MODELS","max_tokens":1024,"stream":false,"messages":[{"role":"user","content":"Привет"}]}'
 ```
 
-Streaming и function tools преобразуются в формат OpenAI. Responses API не реализован и возвращает 404. Для изображений используйте Anthropic или Gemini endpoint.
+Streaming и function tools преобразуются в формат OpenAI. Для изображений используйте Anthropic или Gemini endpoint.
+
+### Codex CLI
+
+Codex CLI использует Responses API. Добавьте в `~/.codex/config.toml`:
+
+```toml
+model_provider = "olm"
+model = "MODEL_FROM_V1_MODELS"
+
+[model_providers.olm]
+name = "OLM Router"
+base_url = "https://api-olm.octx.space/v1"
+env_key = "OLM_API_KEY"
+wire_api = "responses"
+```
+
+Задайте `OLM_API_KEY` в окружении и перезапустите Codex CLI. OLM передаёт текстовые сообщения и function tools в привязанный Google-аккаунт; API не хранит состояние между ответами, поэтому продолжение передавайте в `input`. Изображения и серверные OpenAI tools пока не поддерживаются. Адаптер покрыт локальными тестами; live smoke test Codex CLI ещё не выполнен.
 
 ### Gemini generateContent
 
@@ -90,7 +107,18 @@ export GOOGLE_GENAI_API_VERSION='v1beta'
 gemini --model 'MODEL_FROM_V1_MODELS'
 ```
 
-Выберите API key в `/auth`. Это поддерживаемый [способ указания base URL](https://geminicli.com/docs/reference/configuration/), проверенный с Gemini CLI 0.61.0. Режимы Login with Google и Vertex AI не направляют авторизацию в OLM. Локальный `agy` на Mac является запускателем OmniCode; его нельзя считать стандартным Gemini CLI или обещать ему замену Google OAuth без отдельной настройки.
+Выберите API key в `/auth`. Это поддерживаемый [способ указания base URL](https://geminicli.com/docs/reference/configuration/), проверенный с Gemini CLI 0.61.0. Режимы Login with Google и Vertex AI не направляют авторизацию в OLM. AGY CLI подключается к OLM отдельно, через переменную `OLM_API_KEY`.
+
+### AGY CLI
+
+Установленный AGY CLI может использовать тот же OLM-ключ через нативный Gemini endpoint:
+
+```sh
+export OLM_API_KEY='YOUR_OLM_KEY'
+agy --model 'MODEL_FROM_V1_MODELS'
+```
+
+`OLM_API_BASE_URL` необязателен и по умолчанию равен `https://api-olm.octx.space`. При заданном `OLM_API_KEY` команда не запускает Google OAuth; без него сохраняется обычный прямой вход AGY. Список моделей берётся из назначений ключа. Потребление и квоты аккаунта смотрите в кабинете OLM.
 
 Нативный SDK использует `x-goog-api-key`. Endpoint `:countTokens` считает входной запрос, включая системные инструкции и описания инструментов, и не изменяет счётчик использования.
 
@@ -105,8 +133,9 @@ gemini --model 'MODEL_FROM_V1_MODELS'
 | Claude Code 2.1.319 | Base URL и OLM API-ключ | Проверены ответ и реальный вызов Read с возвратом результата в изолированном профиле |
 | Claude Desktop | Зависит от версии приложения | Не заявлен как совместимый; вымышленных настроек конфигурации нет |
 | Gemini CLI 0.61.0 | OLM API-ключ, GOOGLE_GEMINI_BASE_URL | Проверен реальный запрос в изолированном профиле |
-| Antigravity IDE / OmniCode agy | Зависит от режима и версии | Google OAuth этих приложений не эмулируется |
-| OpenAI Responses | OLM API-ключ | Не реализован |
+| Codex CLI | OLM API-ключ, Responses | Локально проверены текст, function tools, streaming и лимит ключа; live smoke test ожидает production-доступа |
+| AGY CLI | OLM API-ключ или собственный Google OAuth | Добавлен OLM режим через Gemini endpoint; API transport покрыт тестом с подменённым сервером |
+| Antigravity IDE | Собственный Google OAuth | Не подключается к OLM API-ключу |
 
 ## Google OAuth
 
@@ -114,7 +143,7 @@ gemini --model 'MODEL_FROM_V1_MODELS'
 
 Для входа из production-кабинета используйте отдельный Google OAuth client типа **Web application**. Укажите в нём точный Authorized redirect URI `https://olm.octx.space/oauth/google/callback`, затем задайте `ANTIGRAVITY_WEB_CLIENT_ID` и `ANTIGRAVITY_WEB_CLIENT_SECRET` в закрытом production `.env`. После входа Google вернёт браузер в кабинет. Не добавляйте этот HTTPS адрес в desktop-клиент: тип клиента и redirect URI должны совпадать.
 
-`ANTIGRAVITY_CLIENT_ID`, `ANTIGRAVITY_CLIENT_SECRET` и `ANTIGRAVITY_REDIRECT_URI` остаются настройками desktop-клиента. Они нужны для уже связанных аккаунтов и loopback-резерва. При новом входе выбранный OAuth-клиент записывается в зашифрованные credentials аккаунта, поэтому добавление web-клиента не меняет способ обновления ранее связанных refresh tokens. Пока web-клиент не настроен, кабинет предлагает desktop loopback flow с ручным возвратом адреса.
+`ANTIGRAVITY_CLIENT_ID`, `ANTIGRAVITY_CLIENT_SECRET` и `ANTIGRAVITY_REDIRECT_URI` остаются настройками desktop-клиента. Они нужны для уже связанных аккаунтов и локальной разработки. При новом входе выбранный OAuth-клиент записывается в зашифрованные credentials аккаунта, поэтому добавление web-клиента не меняет способ обновления ранее связанных refresh tokens. Production использует только HTTPS callback и больше не переключается на ручной `localhost` вход. Если web-клиент не настроен, кабинет показывает причину вместо формы с адресом возврата.
 
 Google проверяет точное совпадение redirect URI с настройкой OAuth-клиента. Для hosted web flow это должен быть HTTPS адрес из Google Cloud Console. См. [OAuth для web-приложений](https://developers.google.com/identity/protocols/oauth2/web-server) и [OAuth для desktop-приложений](https://developers.google.com/identity/protocols/oauth2/native-app).
 

@@ -275,6 +275,11 @@ export class Antigravity {
       503,
       "OAuth web-клиент Google настроен не полностью",
     );
+    requireThat(
+      process.env.NODE_ENV !== "production" || this.webConfigured(),
+      503,
+      "Вход Google через сайт не настроен. Проверьте web OAuth client в production.",
+    );
     const mode = this.webConfigured() ? "web" : "loopback";
     const client = this.oauthClient(mode === "web" ? "web" : "desktop");
     const redirect = mode === "web" ? this.webRedirect : this.desktopRedirect;
@@ -521,6 +526,7 @@ export class Antigravity {
       maxOutputTokens: body.max_tokens,
       temperature: body.temperature ?? 0.7,
     };
+    if (body.top_p !== undefined) generationConfig.topP = body.top_p;
     if (body.thinking?.type === "enabled")
       generationConfig.thinkingConfig = {
         includeThoughts: true,

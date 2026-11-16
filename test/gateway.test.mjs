@@ -7,7 +7,7 @@ import { DatabaseSync } from "node:sqlite";
 import { Store, Fault, digest } from "../src/core/store.mjs";
 import { Antigravity, events, geminiSchema } from "../src/core/provider.mjs";
 import { createApplication } from "../src/server.mjs";
-import { fromOpenAI } from "../src/api/gateway.mjs";
+import { fromOpenAI, fromResponses } from "../src/api/gateway.mjs";
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "olm-test-"));
 const store = new Store(dir, "aa".repeat(32));
 let server, base, admin, user, other, manager, session, cookie, csrf;
@@ -498,6 +498,44 @@ await test("web OAuth callback keeps strict session and account client binding",
     }
   }
 });
+await test("production Google sign-in cannot fall back to localhost", () => {
+  const env = Object.fromEntries(
+    [
+      "NODE_ENV",
+      "ANTIGRAVITY_CLIENT_ID",
+      "ANTIGRAVITY_CLIENT_SECRET",
+      "ANTIGRAVITY_WEB_CLIENT_ID",
+      "ANTIGRAVITY_WEB_CLIENT_SECRET",
+    ].map((name) => [name, process.env[name]]),
+  );
+  try {
+    process.env.NODE_ENV = "production";
+    process.env.ANTIGRAVITY_CLIENT_ID = "desktop-client";
+    process.env.ANTIGRAVITY_CLIENT_SECRET = "desktop-secret";
+    delete process.env.ANTIGRAVITY_WEB_CLIENT_ID;
+    delete process.env.ANTIGRAVITY_WEB_CLIENT_SECRET;
+    const before = store.db
+      .prepare("SELECT count(*) AS n FROM oauth WHERE session_hash=?")
+      .get("production-session").n;
+    assert.throws(
+      () => new Antigravity(store).start(user.id, "production-session"),
+      (error) =>
+        error.status === 503 &&
+        error.message.includes("Вход Google через сайт не настроен"),
+    );
+    assert.equal(
+      store.db
+        .prepare("SELECT count(*) AS n FROM oauth WHERE session_hash=?")
+        .get("production-session").n,
+      before,
+    );
+  } finally {
+    for (const [name, value] of Object.entries(env)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+});
 await test("role and object ownership enforcement", async () => {
   const normal = await store.login("alice", "test-password-12345");
   const c = "olm_session=" + normal.token;
@@ -829,7 +867,7 @@ await test("OpenAI tool conversion, SSE framing and OAuth isolation", async () =
   if (oldSecret === undefined) delete process.env.ANTIGRAVITY_CLIENT_SECRET;
   else process.env.ANTIGRAVITY_CLIENT_SECRET = oldSecret;
 });
-await test("invalid JSON and unknown protocol fail safely", async () => {
+await test("invalid request bodies fail safely", async () => {
   const k = issueKey(user, "invalid");
   assert.equal(
     (
@@ -845,13 +883,105 @@ await test("invalid JSON and unknown protocol fail safely", async () => {
     (
       await request("/v1/responses", {
         method: "POST",
-        body: payload,
+        body: { model: "gemini-test", input: [] },
         key: k.key,
       })
     ).status,
-    404,
+    400,
+  );
+  assert.equal(
+    (
+      await request("/v1/responses", {
+        method: "POST",
+        body: { input: "Hello" },
+        key: k.key,
+      })
+    ).status,
+    400,
   );
   assert.equal((await request("/api/settings", { method: "PATCH", body: {} })).status, 404);
+});
+await test("Responses API converts text and tools and streams Codex events", async () => {
+  store.db.exec("DELETE FROM cooldowns");
+  const oldConvert = provider.convert,
+    oldGenerate = provider.generate;
+  const key = issueKey(user, "codex-cli", { tokenLimit: 20 });
+  let converted;
+  provider.convert = (body) => {
+    converted = body;
+    return body;
+  };
+  try {
+    const body = {
+      model: "gemini-test",
+      instructions: "Follow the repository rules.",
+      input: [
+        { role: "developer", content: [{ type: "input_text", text: "Use tools." }] },
+        { role: "user", content: [{ type: "input_text", text: "Read file x." }] },
+      ],
+      max_output_tokens: 128,
+      reasoning: { effort: "high" },
+      top_p: 0.9,
+      stream: false,
+      tools: [
+        {
+          type: "function",
+          name: "read_file",
+          description: "Read a file",
+          parameters: { type: "object", properties: { path: { type: "string" } } },
+        },
+      ],
+    };
+    provider.generate = async () => sse([{ text: "Hello" }]);
+    const response = await request("/v1/responses", {
+      method: "POST",
+      body,
+      key: key.key,
+    });
+    assert.equal(response.status, 200, response.text);
+    const result = JSON.parse(response.text);
+    assert.equal(result.object, "response");
+    assert.equal(result.output[0].content[0].text, "Hello");
+    assert.equal(result.usage.total_tokens, 14);
+    assert.equal(converted.system, "Follow the repository rules.\nUse tools.");
+    assert.equal(converted.tools[0].name, "read_file");
+    assert.equal(converted.thinking.budget_tokens, 16384);
+    assert.equal(converted.top_p, 0.9);
+    assert.equal(
+      store.db
+        .prepare("SELECT tokens_used FROM api_key_policies WHERE api_key_id=?")
+        .get(key.id).tokens_used,
+      14,
+    );
+
+    provider.generate = async () =>
+      sse([{ functionCall: { id: "call-1", name: "read_file", args: { path: "x" } } }]);
+    const streamKey = issueKey(user, "codex-cli-stream");
+    const toolStream = await request("/v1/responses", {
+      method: "POST",
+      body: { ...body, stream: true, max_output_tokens: 128 },
+      key: streamKey.key,
+    });
+    assert.equal(toolStream.status, 200, toolStream.text);
+    assert.match(toolStream.text, /event: response\.function_call_arguments\.delta/);
+    assert.match(toolStream.text, /event: response\.completed/);
+    assert.match(toolStream.text, /"type":"function_call"/);
+
+    const convertedInput = fromResponses({
+      model: "gemini-test",
+      input: [
+        { type: "function_call", call_id: "call-2", name: "read_file", arguments: '{"path":"x"}' },
+        { type: "function_call_output", call_id: "call-2", output: "file contents" },
+        { role: "user", content: "Continue" },
+      ],
+    });
+    assert.equal(convertedInput.messages[0].content[0].type, "tool_use");
+    assert.equal(convertedInput.messages[1].content[0].type, "tool_result");
+    assert.equal(convertedInput.messages[1].content[0].tool_use_id, "call-2");
+  } finally {
+    provider.convert = oldConvert;
+    provider.generate = oldGenerate;
+  }
 });
 await test("model route never fails over to a different connected account", async () => {
   store.db.exec("DELETE FROM cooldowns");

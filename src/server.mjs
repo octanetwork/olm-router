@@ -625,6 +625,7 @@ export async function createApplication({
           method === "POST" &&
           (p === "/v1/messages" ||
             p === "/v1/chat/completions" ||
+            p === "/v1/responses" ||
             /^\/v1beta\/models\/[^/]+:(streamGenerateContent|generateContent|countTokens)$/.test(
               p,
             ))
@@ -637,8 +638,17 @@ export async function createApplication({
           concurrent.set(user.id, (concurrent.get(user.id) || 0) + 1);
           try {
             let body = await readJson(req);
+            requireThat(
+              body && typeof body === "object" && !Array.isArray(body),
+              400,
+              "Ожидается JSON-объект",
+            );
             let protocol =
-                p === "/v1/chat/completions" ? "openai" : "anthropic",
+                p === "/v1/chat/completions"
+                  ? "openai"
+                  : p === "/v1/responses"
+                    ? "responses"
+                    : "anthropic",
               nativeRequest;
             if (p.startsWith("/v1beta")) {
               protocol = "gemini";
@@ -671,6 +681,13 @@ export async function createApplication({
                 stream: m[2] === "streamGenerateContent",
               };
             }
+            requireThat(
+              typeof body.model === "string" &&
+                body.model.length > 0 &&
+                body.model.length <= 150,
+              400,
+              "Укажите модель из /v1/models",
+            );
             const account = assignedAccount(
               auth.id,
               user.id,
